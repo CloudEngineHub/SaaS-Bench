@@ -4,6 +4,11 @@
 
 <h1>SaaS-Bench: Can Computer-Use Agents Leverage Real-World SaaS to Solve Professional Workflows?</h1>
 
+[![Paper](https://img.shields.io/badge/arXiv-Paper-b91c1c?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/TODO)
+[![Blog](https://img.shields.io/badge/Blog-Read_Post-f59e0b?style=for-the-badge&logo=substack&logoColor=white)](https://unipat.ai/blog/SaaS-Bench)
+[![GitHub](https://img.shields.io/badge/GitHub-Code-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/UniPat-AI/SaaS-Bench)
+
+
 </div>
 
 ---
