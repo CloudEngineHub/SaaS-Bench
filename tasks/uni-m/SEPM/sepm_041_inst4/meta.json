@@ -1,0 +1,12 @@
+{
+  "task_id": "sepm_041_inst4",
+  "category_id": "SEPM",
+  "meta_data": {
+    "sites": [
+      "code-server",
+      "baserow",
+      "openproject"
+    ],
+    "require_login": true
+  }
+}

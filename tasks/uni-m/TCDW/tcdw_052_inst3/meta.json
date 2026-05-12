@@ -1,0 +1,13 @@
+{
+  "task_id": "tcdw_052_inst3",
+  "category_id": "TCDW",
+  "meta_data": {
+    "sites": [
+      "roundcubemail",
+      "mattermost",
+      "owncloud",
+      "onlyoffice"
+    ],
+    "require_login": true
+  }
+}

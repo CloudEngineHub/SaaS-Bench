@@ -1,0 +1,11 @@
+{
+  "task_id": "aasc_020",
+  "category_id": "AASC",
+  "meta_data": {
+    "sites": [
+      "recipya",
+      "grocy"
+    ],
+    "require_login": true
+  }
+}

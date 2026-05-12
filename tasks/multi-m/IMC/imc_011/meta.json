@@ -1,0 +1,12 @@
+{
+  "task_id": "imc_011",
+  "category_id": "IMC",
+  "meta_data": {
+    "sites": [
+      "watcharr",
+      "booklore",
+      "siyuan"
+    ],
+    "require_login": true
+  }
+}

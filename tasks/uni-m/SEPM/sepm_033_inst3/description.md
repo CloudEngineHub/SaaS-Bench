@@ -1,0 +1,17 @@
+**Task Requirements:**
+
+Audit and remediate the CI/CD pipeline for the devops-configs project. In code-server, open the file devops-configs/.github/workflows/deploy.yml in the editor; use Find (Ctrl+F) to locate the top-level 'jobs:' mapping and record every job name defined directly under it (one level of indentation below 'jobs:'), and for each job record its 'runs-on' value and whether it declares a 'needs:' key. Then in the same file, use Find and Replace (Ctrl+H) with regex mode enabled to replace the exact token "ubuntu-18.04" with "ubuntu-22.04" throughout the file, save the file with Ctrl+S, and in the Source Control panel stage only devops-configs/.github/workflows/deploy.yml and commit with the exact message "ci: upgrade runner to ubuntu-22.04". In Baserow, create a database "CI Workflow Remediation Tracker" with a table "CI Jobs" (fields: Job ID [primary text, formatted CJ-<NN> starting at CJ-01], Job Name [text], Runs On [text], Has Dependencies [boolean], Stage Category [single-select: Build/Test/Lint/Deploy/Other], Missing Stage [boolean]); insert exactly one row per extracted job in the order they appear in the file (top to bottom), assign Stage Category using {"docker-build": "Build", "npm-build": "Build", "jest": "Test", "e2e": "Test", "prettier": "Lint", "tflint": "Lint", "deploy-staging": "Deploy", "deploy-prod": "Deploy", "notify": "Other"} (keyed by Job Name) and Other for any job not in the map, and set Missing Stage=true for every Stage Category value in ['Build','Test','Lint','Deploy'] that does not appear in the inserted rows (create one extra row per missing required stage with Job Name="MISSING:<stage>", Runs On="", Has Dependencies=false, Stage Category=<stage>, Missing Stage=true). Add a Grid view "Gaps" filtered to Missing Stage=true. In OpenProject project "devops-automation", create exactly one Task-type work package per row where Missing Stage=true, with subject "Add CI stage: <Stage Category>", assignee Paul Harris, priority High, description exactly "Add a job of category <Stage Category> to devops-configs/.github/workflows/deploy.yml; current jobs: <comma-separated list of Job Name values where Missing Stage=false, sorted alphabetically>".
+
+**Steps:**
+
+1. In code-server, open devops-configs/.github/workflows/deploy.yml in the editor and enumerate all job names, runs-on values, and needs declarations under the top-level jobs mapping
+2. In code-server, use Find and Replace (Ctrl+H) with regex enabled to replace 'ubuntu-18.04' with 'ubuntu-22.04' in devops-configs/.github/workflows/deploy.yml, save, and commit via Source Control panel with exact message 'ci: upgrade runner to ubuntu-22.04'
+3. In Baserow, create database 'CI Workflow Remediation Tracker' with the 'CI Jobs' table schema and insert one row per discovered job with Stage Category from {"docker-build": "Build", "npm-build": "Build", "jest": "Test", "e2e": "Test", "prettier": "Lint", "tflint": "Lint", "deploy-staging": "Deploy", "deploy-prod": "Deploy", "notify": "Other"}
+4. For each required stage in ['Build','Test','Lint','Deploy'] not covered by an existing job, insert a placeholder MISSING row with Missing Stage=true; add Grid view 'Gaps' filtered to Missing Stage=true
+5. In OpenProject 'devops-automation', create one Task work package per Missing Stage=true row with the specified subject, assignee, priority, and description
+
+**Login Credentials:**
+
+- code-server: (no username) / 8a128206e2177bce1e48e565
+- baserow: admin@example.com / Admin1234
+- openproject: admin / AdminPass123!

@@ -1,0 +1,13 @@
+{
+  "task_id": "bof_121_inst3",
+  "category_id": "BOF",
+  "meta_data": {
+    "sites": [
+      "twenty",
+      "bigcapital",
+      "hrms",
+      "pretix"
+    ],
+    "require_login": true
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "task_id": "imc_066",
+  "category_id": "IMC",
+  "meta_data": {
+    "sites": [
+      "siyuan"
+    ],
+    "require_login": true
+  },
+  "multimodal_input": [
+    {
+      "file": "tasks/multi-m/inputs/siyuan_paper_001.pdf",
+      "type": "pdf",
+      "role": "siyuan_asset"
+    }
+  ]
+}

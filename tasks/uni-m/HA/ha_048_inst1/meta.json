@@ -1,0 +1,12 @@
+{
+  "task_id": "ha_048_inst1",
+  "category_id": "HA",
+  "meta_data": {
+    "sites": [
+      "openemr",
+      "opnform",
+      "onlyoffice"
+    ],
+    "require_login": true
+  }
+}

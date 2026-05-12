@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Local env
+.env
+
+# Local results / scratch
+results/
+results_*/
+*.log
+
+# Docker image archives (downloaded separately, see docker/README.md)
+docker/images/*.tar
+docker/images/*.tar.gz
+!docker/images/.gitkeep
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

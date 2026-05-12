@@ -1,0 +1,11 @@
+{
+  "task_id": "imc_063",
+  "category_id": "IMC",
+  "meta_data": {
+    "sites": [
+      "booklore",
+      "siyuan"
+    ],
+    "require_login": true
+  }
+}

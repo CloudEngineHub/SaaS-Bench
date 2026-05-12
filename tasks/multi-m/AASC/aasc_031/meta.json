@@ -1,0 +1,19 @@
+{
+  "task_id": "aasc_031",
+  "category_id": "AASC",
+  "meta_data": {
+    "sites": [
+      "recipya",
+      "grocy",
+      "farmos"
+    ],
+    "require_login": true
+  },
+  "multimodal_input": [
+    {
+      "file": "tasks/multi-m/inputs/recipya_recipe_006.jpg",
+      "type": "image",
+      "role": "recipya_asset"
+    }
+  ]
+}

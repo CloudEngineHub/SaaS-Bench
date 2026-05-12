@@ -1,0 +1,10 @@
+{
+  "task_id": "aasc_003",
+  "category_id": "AASC",
+  "meta_data": {
+    "sites": [
+      "e-label"
+    ],
+    "require_login": true
+  }
+}

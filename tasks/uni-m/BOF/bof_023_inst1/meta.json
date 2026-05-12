@@ -1,0 +1,12 @@
+{
+  "task_id": "bof_023_inst1",
+  "category_id": "BOF",
+  "meta_data": {
+    "sites": [
+      "hrms",
+      "bigcapital",
+      "twenty"
+    ],
+    "require_login": true
+  }
+}

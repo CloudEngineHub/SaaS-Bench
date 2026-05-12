@@ -1,0 +1,18 @@
+{
+  "task_id": "imc_070",
+  "category_id": "IMC",
+  "meta_data": {
+    "sites": [
+      "watcharr",
+      "siyuan"
+    ],
+    "require_login": true
+  },
+  "multimodal_input": [
+    {
+      "file": "tasks/multi-m/inputs/watcharr_poster_001.jpg",
+      "type": "image",
+      "role": "watcharr_asset"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "saas-bench"
+version = "0.1.0"
+description = "SaaS-Bench: a benchmark for evaluating LLM agents on real SaaS applications."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "SaaS-Bench Authors"},
+]
+dependencies = [
+    "browser-use",
+    "playwright>=1.40",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+saas-bench = "saas_bench.run:main"
+
+[tool.setuptools.packages.find]
+include = ["saas_bench*"]
+
+[tool.setuptools.package-data]
+saas_bench = ["apps.yaml"]
