@@ -146,12 +146,10 @@ See [docs/task_format.md](docs/task_format.md) and
 
 ## Citation
 
-> TODO: replace with the official citation block once the paper is on arXiv.
-
 ```bibtex
 @misc{saasbench2026,
   title  = {SaaS-Bench: Can Computer-Use Agents Leverage Real-World SaaS to Solve Professional Workflows?},
-  author = {SaaS-Bench Authors},
+  author = {UniPat AI},
   year   = {2026}
 }
 ```
