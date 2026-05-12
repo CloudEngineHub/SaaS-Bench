@@ -6,8 +6,8 @@ exactly three files:
 ```
 tasks/
 └── multi/uni-m
-    └── BOF/
-        └── bof_023_inst1/
+    └── Business/
+        └── business_023_inst1/
             ├── description.md   # Human-readable task spec
             ├── meta.json        # Machine-readable metadata
             └── verify.py        # Scoring script
@@ -37,8 +37,8 @@ agent's `todo.md`. Steps must be a top-level numbered list ("1. ...").
 
 ```json
 {
-  "task_id": "bof_023_inst1",
-  "category_id": "BOF",
+  "task_id": "business_023_inst1",
+  "category_id": "Business",
   "meta_data": {
     "sites": ["hrms", "bigcapital", "twenty"],
     "require_login": true

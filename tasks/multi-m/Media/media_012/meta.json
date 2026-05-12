@@ -1,0 +1,12 @@
+{
+  "task_id": "media_012",
+  "category_id": "Media",
+  "meta_data": {
+    "sites": [
+      "watcharr",
+      "booklore",
+      "siyuan"
+    ],
+    "require_login": true
+  }
+}

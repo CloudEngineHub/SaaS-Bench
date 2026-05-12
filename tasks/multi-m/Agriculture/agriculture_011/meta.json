@@ -1,0 +1,22 @@
+{
+  "task_id": "agriculture_011",
+  "category_id": "Agriculture",
+  "meta_data": {
+    "sites": [
+      "farmos"
+    ],
+    "require_login": true
+  },
+  "multimodal_input": [
+    {
+      "file": "tasks/multi-m/inputs/farmos_crop_043.jpg",
+      "type": "image",
+      "role": "full_field_overview_corn"
+    },
+    {
+      "file": "tasks/multi-m/inputs/farmos_crop_044.jpg",
+      "type": "image",
+      "role": "close_up_aphid_infestation_tassel"
+    }
+  ]
+}

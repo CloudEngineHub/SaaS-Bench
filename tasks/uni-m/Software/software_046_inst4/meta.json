@@ -1,0 +1,12 @@
+{
+  "task_id": "software_046_inst4",
+  "category_id": "Software",
+  "meta_data": {
+    "sites": [
+      "openproject",
+      "code-server",
+      "baserow"
+    ],
+    "require_login": true
+  }
+}

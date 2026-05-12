@@ -167,7 +167,7 @@ apps:
     health_path: "/"
     startup_wait: 120
 
-  # -- AASC / IMC New Apps --------------------------------------------------
+  # -- Agriculture / Media New Apps --------------------------------------------------
 
   grocy:
     app_index: 14

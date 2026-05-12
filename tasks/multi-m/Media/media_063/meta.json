@@ -1,0 +1,11 @@
+{
+  "task_id": "media_063",
+  "category_id": "Media",
+  "meta_data": {
+    "sites": [
+      "booklore",
+      "siyuan"
+    ],
+    "require_login": true
+  }
+}

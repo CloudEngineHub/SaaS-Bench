@@ -1,0 +1,10 @@
+{
+  "task_id": "agriculture_016",
+  "category_id": "Agriculture",
+  "meta_data": {
+    "sites": [
+      "farmos"
+    ],
+    "require_login": true
+  }
+}

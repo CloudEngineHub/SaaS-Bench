@@ -339,7 +339,7 @@ def main(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="SaaS-Bench eval harness")
     p.add_argument("--tasks-dir", required=True,
-                   help="Task directory root (containing BOF/ HA/ SEPM/ TCDW/ subdirectories)")
+                   help="Task directory root (containing Software/ Business/ Healthcare/ Teamwork/ subdirectories)")
     p.add_argument("--model", default="qwen/qwen3.6-plus")
     p.add_argument("--workers", type=int, default=3)
     p.add_argument("--result-dir", default="results")

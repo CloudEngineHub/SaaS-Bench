@@ -1,0 +1,18 @@
+{
+  "task_id": "media_020",
+  "category_id": "Media",
+  "meta_data": {
+    "sites": [
+      "photoprism",
+      "mediacms"
+    ],
+    "require_login": true
+  },
+  "multimodal_input": [
+    {
+      "file": "tasks/multi-m/inputs/photoprism_photo_003.jpg",
+      "type": "image",
+      "role": "photoprism_asset"
+    }
+  ]
+}

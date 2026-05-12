@@ -1,0 +1,17 @@
+{
+  "task_id": "media_033",
+  "category_id": "Media",
+  "meta_data": {
+    "sites": [
+      "siyuan"
+    ],
+    "require_login": true
+  },
+  "multimodal_input": [
+    {
+      "file": "tasks/multi-m/inputs/siyuan_paper_001.pdf",
+      "type": "pdf",
+      "role": "siyuan_asset"
+    }
+  ]
+}

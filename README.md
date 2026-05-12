@@ -25,14 +25,14 @@ The bench currently ships **106 task instances across 6 domains** (split
 into a text-only **uni-m** track and a multimodal **multi-m** track) and
 **23 self-hosted SaaS apps**:
 
-| Track   | Domain | Tasks | Representative apps                              |
-| ------- | ------ | ----- | ------------------------------------------------ |
-| uni-m   | BOF    | 15    | Twenty, Bigcapital, HRMS, Pretix                 |
-| uni-m   | HA     | 16    | OpenEMR, OnlyOffice, OpnForm                     |
-| uni-m   | SEPM   | 31    | Baserow, OpenProject, code-server, Metabase      |
-| uni-m   | TCDW   | 12    | OnlyOffice, Mattermost, RoundcubeMail, ownCloud  |
-| multi-m | AASC   | 12    | Grocy, farmOS, Recipya, e-label                  |
-| multi-m | IMC    | 20    | SiYuan, Watcharr, BookLore, PhotoPrism, MediaCMS |
+| Track   | Domain      | Tasks | Representative apps                              |
+| ------- | ----------- | ----- | ------------------------------------------------ |
+| uni-m   | Business    | 15    | Twenty, Bigcapital, HRMS, Pretix                 |
+| uni-m   | Healthcare  | 16    | OpenEMR, OnlyOffice, OpnForm                     |
+| uni-m   | Software    | 31    | Baserow, OpenProject, code-server, Metabase      |
+| uni-m   | Teamwork    | 12    | OnlyOffice, Mattermost, RoundcubeMail, ownCloud  |
+| multi-m | Agriculture | 12    | Grocy, farmOS, Recipya, e-label                  |
+| multi-m | Media       | 20    | SiYuan, Watcharr, BookLore, PhotoPrism, MediaCMS |
 
 Multi-m tasks consume image / audio / PDF inputs from
 `tasks/multi-m/inputs/`; verifiers locate them via paths relative to
@@ -56,8 +56,8 @@ saas_bench/         Eval harness (Python package)
 
 docker/             Compose templates + image archives (download separately)
 tasks/
-  uni-m/            Text-only tasks (BOF, HA, SEPM, TCDW)
-  multi-m/          Multimodal tasks (AASC, IMC) + inputs/ assets
+  uni-m/            Text-only tasks (Software, Business, Healthcare, Teamwork)
+  multi-m/          Multimodal tasks (Agriculture, Media) + inputs/ assets
 scripts/            run.sh, stop_all.sh, load_images.sh, fetch_multimodal_assets.sh
 docs/               Verify protocol and task format specifications
 ```
@@ -104,8 +104,8 @@ Useful flags:
 
 ```bash
 bash scripts/run.sh --workers 8                                 # bump concurrency
-bash scripts/run.sh --tasks-dir tasks/uni-m/BOF                  # one domain
-bash scripts/run.sh --task-ids bof_023_inst1 sepm_004_inst1     # cherry-pick
+bash scripts/run.sh --tasks-dir tasks/uni-m/Business                  # one domain
+bash scripts/run.sh --task-ids business_023_inst1 software_004_inst1     # cherry-pick
 bash scripts/run.sh --max-steps 200                             # tighter step budget
 bash scripts/run.sh --result-dir results/run_2026_05_05         # custom output dir
 bash scripts/run.sh --no-isolation                              # reuse already-running containers

@@ -124,7 +124,7 @@ SITE_CONFIG: dict[str, dict] = {
         "db_var":            "ROUNDCUBEMAIL_DB_CONTAINER",
         "db_suffix":         "",
     },
-    # -- AASC / IMC New Apps --------------------------------------------------
+    # -- Agriculture / Media New Apps --------------------------------------------------
     "grocy": {
         "port_var":          "GROCY_PORT",
         "container_var":     "GROCY_CONTAINER",

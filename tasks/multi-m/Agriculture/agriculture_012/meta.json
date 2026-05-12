@@ -1,0 +1,10 @@
+{
+  "task_id": "agriculture_012",
+  "category_id": "Agriculture",
+  "meta_data": {
+    "sites": [
+      "e-label"
+    ],
+    "require_login": true
+  }
+}

@@ -1,4 +1,4 @@
-# Extend mw-code-server with missing dependencies for SEPM tasks
+# Extend mw-code-server with missing dependencies for Software tasks
 # Build: docker build -t mw-code-server:latest -f rollout/docker/code-server-deps.Dockerfile .
 FROM mw-code-server:latest
 

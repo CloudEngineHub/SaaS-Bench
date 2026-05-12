@@ -1,0 +1,18 @@
+{
+  "task_id": "media_072",
+  "category_id": "Media",
+  "meta_data": {
+    "sites": [
+      "watcharr",
+      "siyuan"
+    ],
+    "require_login": true
+  },
+  "multimodal_input": [
+    {
+      "file": "tasks/multi-m/inputs/watcharr_poster_002.jpg",
+      "type": "image",
+      "role": "watcharr_asset"
+    }
+  ]
+}

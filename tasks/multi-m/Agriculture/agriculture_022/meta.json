@@ -1,0 +1,11 @@
+{
+  "task_id": "agriculture_022",
+  "category_id": "Agriculture",
+  "meta_data": {
+    "sites": [
+      "grocy",
+      "farmos"
+    ],
+    "require_login": true
+  }
+}

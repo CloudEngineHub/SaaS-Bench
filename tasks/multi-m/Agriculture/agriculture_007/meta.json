@@ -1,0 +1,11 @@
+{
+  "task_id": "agriculture_007",
+  "category_id": "Agriculture",
+  "meta_data": {
+    "sites": [
+      "grocy",
+      "recipya"
+    ],
+    "require_login": true
+  }
+}

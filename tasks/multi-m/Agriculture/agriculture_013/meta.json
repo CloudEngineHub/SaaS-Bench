@@ -1,0 +1,18 @@
+{
+  "task_id": "agriculture_013",
+  "category_id": "Agriculture",
+  "meta_data": {
+    "sites": [
+      "grocy",
+      "recipya"
+    ],
+    "require_login": true
+  },
+  "multimodal_input": [
+    {
+      "file": "tasks/multi-m/inputs/recipya_recipe_545.jpg",
+      "type": "image",
+      "role": "dish_photo_from_restaurant_partner"
+    }
+  ]
+}
