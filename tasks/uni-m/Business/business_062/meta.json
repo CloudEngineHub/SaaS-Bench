@@ -1,0 +1,12 @@
+{
+  "task_id": "business_062",
+  "category_id": "Business",
+  "meta_data": {
+    "sites": [
+      "bigcapital",
+      "twenty",
+      "hrms"
+    ],
+    "require_login": true
+  }
+}

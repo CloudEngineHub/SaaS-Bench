@@ -1,0 +1,11 @@
+{
+  "task_id": "business_135",
+  "category_id": "Business",
+  "meta_data": {
+    "sites": [
+      "pretix",
+      "twenty"
+    ],
+    "require_login": true
+  }
+}

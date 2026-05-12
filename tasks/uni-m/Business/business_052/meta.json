@@ -1,0 +1,12 @@
+{
+  "task_id": "business_052",
+  "category_id": "Business",
+  "meta_data": {
+    "sites": [
+      "pretix",
+      "twenty",
+      "bigcapital"
+    ],
+    "require_login": true
+  }
+}

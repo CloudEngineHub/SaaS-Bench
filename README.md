@@ -105,7 +105,7 @@ Useful flags:
 ```bash
 bash scripts/run.sh --workers 8                                 # bump concurrency
 bash scripts/run.sh --tasks-dir tasks/uni-m/Business                  # one domain
-bash scripts/run.sh --task-ids business_023_inst1 software_004_inst1     # cherry-pick
+bash scripts/run.sh --task-ids business_023 software_004             # cherry-pick
 bash scripts/run.sh --max-steps 200                             # tighter step budget
 bash scripts/run.sh --result-dir results/run_2026_05_05         # custom output dir
 bash scripts/run.sh --no-isolation                              # reuse already-running containers

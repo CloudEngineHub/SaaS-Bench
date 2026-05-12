@@ -1,0 +1,13 @@
+{
+  "task_id": "teamwork_083",
+  "category_id": "Teamwork",
+  "meta_data": {
+    "sites": [
+      "roundcubemail",
+      "onlyoffice",
+      "owncloud",
+      "mattermost"
+    ],
+    "require_login": true
+  }
+}

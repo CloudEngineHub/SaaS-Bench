@@ -1,0 +1,12 @@
+{
+  "task_id": "healthcare_030",
+  "category_id": "Healthcare",
+  "meta_data": {
+    "sites": [
+      "opnform",
+      "openemr",
+      "onlyoffice"
+    ],
+    "require_login": true
+  }
+}

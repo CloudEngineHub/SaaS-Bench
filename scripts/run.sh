@@ -6,7 +6,7 @@
 #   ./scripts/run.sh                                       # run with default settings
 #   ./scripts/run.sh --workers 5                           # 5 concurrent workers
 #   ./scripts/run.sh --no-isolation                        # do not start Docker isolation containers
-#   ./scripts/run.sh --task-ids business_023_inst1 software_004_inst1
+#   ./scripts/run.sh --task-ids business_023 software_004
 #   ./scripts/run.sh --tasks-dir tasks/Business                 # run a single domain only
 
 set -euo pipefail
