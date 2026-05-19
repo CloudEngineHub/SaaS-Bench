@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="SaaS-Bench" width=60%/>
+<img src="assets/banner.svg" alt="SaaS-Bench" width=70%/>
 
 <h1>SaaS-Bench: Can Computer-Use Agents Leverage Real-World SaaS to Solve Professional Workflows?</h1>
 
