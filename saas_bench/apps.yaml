@@ -28,7 +28,7 @@ apps:
       docker run -d --name {container}
       -e PASSWORD=8a128206e2177bce1e48e565 -u 0
       -p {port}:8080
-      mw-code-server:latest
+      code-server-bundle:latest
     health_path: "/"
     startup_wait: 900
 
