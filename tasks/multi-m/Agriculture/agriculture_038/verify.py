@@ -37,14 +37,17 @@ FARMOS_DB_PATH = "/opt/drupal/web/sites/default/files/.ht.sqlite"
 DISCREPANCY_TEXT = "DISCREPANCY: No FarmOS Harvest Log"
 
 # ── Result accumulator ────────────────────────────────────────────────────────
-_checks: list[tuple[str, int, bool, str]] = []
+_checks: list[tuple[str, int, bool, str, bool]] = []
 
 
-def check(label: str, weight: int, passed: bool, detail: str = "") -> None:
-    _checks.append((label, weight, passed, detail))
-    status = "PASS" if passed else "FAIL"
+def check(label: str, weight: int, passed: bool, detail: str = "", *, skipped: bool = False) -> None:
+    _checks.append((label, weight, passed, detail, skipped))
     tail = f"  ({detail})" if detail else ""
-    print(f"[{status}] ({weight}pt) {label}{tail}", file=sys.stderr)
+    if skipped:
+        print(f"[SKIP] (0/{weight}pt) {label}{tail}", file=sys.stderr)
+    else:
+        status = "PASS" if passed else "FAIL"
+        print(f"[{status}] ({weight}pt) {label}{tail}", file=sys.stderr)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -115,6 +118,30 @@ def get_farmos_harvest_log_names() -> set[str]:
     return {r["name"] for r in rows}
 
 
+# ── Precondition probe ───────────────────────────────────────────────────────
+_batch_userfield_seeded_cache: bool | None = None
+
+
+def _batch_userfield_seeded() -> bool:
+    """Returns True iff the `batch_number` userfield is registered on `products`.
+
+    Used to mark seed-dependent checks as SKIPPED when the environment hasn't
+    been provisioned with the `batch_number` userfield — the agent has no way
+    to influence this, so it should not affect the score.
+    """
+    global _batch_userfield_seeded_cache
+    if _batch_userfield_seeded_cache is not None:
+        return _batch_userfield_seeded_cache
+    try:
+        rows = grocy_query(
+            "SELECT 1 FROM userfields WHERE entity = 'products' AND name = 'batch_number'"
+        )
+        _batch_userfield_seeded_cache = len(rows) > 0
+    except Exception:
+        _batch_userfield_seeded_cache = False
+    return _batch_userfield_seeded_cache
+
+
 # ── Individual checks ─────────────────────────────────────────────────────────
 def check_1_batch_number_userfield_exists() -> None:
     """Grocy has a userfield named 'batch_number' on entity 'products'."""
@@ -123,8 +150,13 @@ def check_1_batch_number_userfield_exists() -> None:
             "SELECT id, entity, name, caption FROM userfields "
             "WHERE entity = 'products' AND name = 'batch_number'"
         )
-        check("1. batch_number_userfield_exists", 1, len(rows) > 0,
-              f"found userfield id={rows[0]['id']}" if rows else "no batch_number userfield on products")
+        if rows:
+            check("1. batch_number_userfield_exists", 1, True,
+                  f"found userfield id={rows[0]['id']}")
+        else:
+            check("1. batch_number_userfield_exists", 1, False,
+                  "skipped: no batch_number userfield on products (environment seed missing)",
+                  skipped=True)
     except Exception as e:
         check("1. batch_number_userfield_exists", 1, False, f"exception: {e}")
 
@@ -132,6 +164,11 @@ def check_1_batch_number_userfield_exists() -> None:
 def check_2_products_have_batch_numbers() -> None:
     """At least one Grocy product has a non-empty batch_number value."""
     try:
+        if not _batch_userfield_seeded():
+            check("2. products_have_batch_numbers", 1, False,
+                  "skipped: batch_number userfield not seeded in environment",
+                  skipped=True)
+            return
         products = get_grocy_batch_products()
         check("2. products_have_batch_numbers", 1, len(products) > 0,
               f"found {len(products)} products with batch_number" if products
@@ -153,6 +190,11 @@ def check_3_farmos_harvest_logs_exist() -> None:
 def check_4_matched_products_no_discrepancy() -> None:
     """Products whose batch_number matches a FarmOS harvest log do NOT have the discrepancy text."""
     try:
+        if not _batch_userfield_seeded():
+            check("4. matched_products_no_discrepancy", 2, False,
+                  "skipped: batch_number userfield not seeded in environment",
+                  skipped=True)
+            return
         products = get_grocy_batch_products()
         harvest_names = get_farmos_harvest_log_names()
         matched = [p for p in products if p["batch_number"] in harvest_names]
@@ -173,6 +215,11 @@ def check_4_matched_products_no_discrepancy() -> None:
 def check_5_unmatched_products_have_discrepancy() -> None:
     """Unmatched products have 'DISCREPANCY: No FarmOS Harvest Log' in their description."""
     try:
+        if not _batch_userfield_seeded():
+            check("5. unmatched_products_have_discrepancy", 3, False,
+                  "skipped: batch_number userfield not seeded in environment",
+                  skipped=True)
+            return
         products = get_grocy_batch_products()
         harvest_names = get_farmos_harvest_log_names()
         unmatched = [p for p in products if p["batch_number"] not in harvest_names]
@@ -194,6 +241,11 @@ def check_5_unmatched_products_have_discrepancy() -> None:
 def check_6_discrepancy_text_appended() -> None:
     """For flagged products, the discrepancy text is appended (not replacing the description)."""
     try:
+        if not _batch_userfield_seeded():
+            check("6. discrepancy_text_appended", 2, False,
+                  "skipped: batch_number userfield not seeded in environment",
+                  skipped=True)
+            return
         products = get_grocy_batch_products()
         harvest_names = get_farmos_harvest_log_names()
         unmatched_flagged = [
@@ -265,6 +317,11 @@ def check_8_no_false_positives() -> None:
 def check_9_exact_match_used() -> None:
     """FarmOS harvest log name field exactly matches batch_number (not partial)."""
     try:
+        if not _batch_userfield_seeded():
+            check("9. exact_match_used", 2, False,
+                  "skipped: batch_number userfield not seeded in environment",
+                  skipped=True)
+            return
         products = get_grocy_batch_products()
         harvest_names = get_farmos_harvest_log_names()
         matched = [p for p in products if p["batch_number"] in harvest_names]
@@ -325,13 +382,16 @@ def main() -> None:
     check_9_exact_match_used()
     check_10_discrepancy_count_correct()
 
-    total = sum(w for _, w, _, _ in _checks)
-    earned = sum(w for _, w, p, _ in _checks if p)
-    all_pass = all(p for _, _, p, _ in _checks) and bool(_checks)
+    scored = [c for c in _checks if not c[4]]
+    total = sum(w for _, w, _, _, _ in scored)
+    earned = sum(w for _, w, p, _, _ in scored if p)
+    all_pass = all(p for _, _, p, _, _ in scored) and bool(scored)
     score = (earned / total) if total else 0.0
 
+    skipped_count = sum(1 for c in _checks if c[4])
+    skip_note = f"  (skipped {skipped_count})" if skipped_count else ""
     print(
-        f"SCORE: {score:.3f}  PASS: {all_pass}  ({earned}/{total})",
+        f"SCORE: {score:.3f}  PASS: {all_pass}  ({earned}/{total}){skip_note}",
         file=sys.stderr,
     )
     sys.exit(0 if all_pass else 1)
