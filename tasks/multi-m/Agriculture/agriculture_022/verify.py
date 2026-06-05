@@ -1,6 +1,7 @@
 """
-Verifier for agriculture_022: Organic audit — cross-reference Grocy product batches
-against FarmOS harvest logs; flag discrepant products.
+Verifier for agriculture_022: Organic audit — cross-reference Grocy product
+stock_id values (from the `stock` table, excluding `x%` placeholders) against
+FarmOS harvest log `lot_number` attributes; flag discrepant products.
 
 Checks: 8 weighted checks across grocy, farmos.
 Strategy: grocy via docker exec sqlite3; farmos via JSON:API.
@@ -112,8 +113,8 @@ def grocy_sql(query: str) -> str:
 
 
 # ── Data retrieval ────────────────────────────────────────────────────────────
-def get_grocy_products_with_batches() -> dict[int, dict]:
-    """Return {product_id: {name, description, batch_numbers: set}} for products with stock entries."""
+def get_grocy_products_with_stock_ids() -> dict[int, dict]:
+    """Return {product_id: {name, description, stock_ids: set}} for products with non-placeholder stock entries."""
     raw = grocy_sql(
         "SELECT p.id, p.name, COALESCE(p.description,''), s.stock_id "
         "FROM products p "
@@ -133,9 +134,9 @@ def get_grocy_products_with_batches() -> dict[int, dict]:
                 products[pid] = {
                     "name": parts[1].strip(),
                     "description": parts[2].strip(),
-                    "batch_numbers": set(),
+                    "stock_ids": set(),
                 }
-            products[pid]["batch_numbers"].add(stock_id)
+            products[pid]["stock_ids"].add(stock_id)
     return products
 
 
@@ -166,19 +167,17 @@ def get_farmos_harvest_lot_numbers() -> set[str]:
 # ── Shared state (loaded once) ───────────────────────────────────────────────
 grocy_products: dict[int, dict] = {}
 farmos_lots: set[str] = set()
-all_grocy_batches: set[str] = set()
 matched_pids: set[int] = set()
 unmatched_pids: set[int] = set()
 
 
 def load_data() -> None:
-    global grocy_products, farmos_lots, all_grocy_batches, matched_pids, unmatched_pids
-    grocy_products = get_grocy_products_with_batches()
+    global grocy_products, farmos_lots, matched_pids, unmatched_pids
+    grocy_products = get_grocy_products_with_stock_ids()
     farmos_lots = get_farmos_harvest_lot_numbers()
 
     for pid, info in grocy_products.items():
-        all_grocy_batches.update(info["batch_numbers"])
-        if info["batch_numbers"] & farmos_lots:
+        if info["stock_ids"] & farmos_lots:
             matched_pids.add(pid)
         else:
             unmatched_pids.add(pid)

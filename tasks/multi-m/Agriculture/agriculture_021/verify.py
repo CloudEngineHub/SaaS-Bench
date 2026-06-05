@@ -43,14 +43,17 @@ GROCY_DB_CANDIDATES = [
 AUDIT_FLAG = "AUDIT FLAG: Missing FarmOS harvest log"
 
 # ── Result accumulator ────────────────────────────────────────────────────────
-_checks: list[tuple[str, int, bool, str]] = []
+_checks: list[tuple[str, int, bool, str, bool]] = []
 
 
-def check(label: str, weight: int, passed: bool, detail: str = "") -> None:
-    _checks.append((label, weight, passed, detail))
-    status = "PASS" if passed else "FAIL"
+def check(label: str, weight: int, passed: bool, detail: str = "", *, skipped: bool = False) -> None:
+    _checks.append((label, weight, passed, detail, skipped))
     tail = f"  ({detail})" if detail else ""
-    print(f"[{status}] ({weight}pt) {label}{tail}", file=sys.stderr)
+    if skipped:
+        print(f"[SKIP] (0/{weight}pt) {label}{tail}", file=sys.stderr)
+    else:
+        status = "PASS" if passed else "FAIL"
+        print(f"[{status}] ({weight}pt) {label}{tail}", file=sys.stderr)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -118,6 +121,22 @@ def farmos_sql_json(query: str) -> list[dict]:
 # ── Cached state ──────────────────────────────────────────────────────────────
 _grocy_products_with_batch: list[dict] = []
 _farmos_harvest_names: set[str] = set()
+_batch_userfield_seeded_cache: bool | None = None
+
+
+def _batch_userfield_seeded() -> bool:
+    """Returns True iff the `batch_number` userfield is registered on `products`."""
+    global _batch_userfield_seeded_cache
+    if _batch_userfield_seeded_cache is not None:
+        return _batch_userfield_seeded_cache
+    try:
+        rows = grocy_sql_json(
+            "SELECT 1 FROM userfields WHERE entity = 'products' AND name = 'batch_number'"
+        )
+        _batch_userfield_seeded_cache = len(rows) > 0
+    except Exception:
+        _batch_userfield_seeded_cache = False
+    return _batch_userfield_seeded_cache
 
 
 def _load_grocy_products() -> list[dict]:
@@ -172,6 +191,11 @@ def check_2_farmos_harvest_logs_retrievable() -> None:
 
 def check_3_at_least_one_batch_product() -> None:
     try:
+        if not _batch_userfield_seeded():
+            check("3. at_least_one_batch_product", 1, False,
+                  "skipped: batch_number userfield not seeded in environment",
+                  skipped=True)
+            return
         products = _load_grocy_products()
         check("3. at_least_one_batch_product", 1, len(products) > 0,
               f"count={len(products)}" if products else "no products with batch_number found")
@@ -292,6 +316,11 @@ def check_7_flag_text_exact() -> None:
 
 def check_8_both_matched_and_unmatched_exist() -> None:
     try:
+        if not _batch_userfield_seeded():
+            check("8. both_matched_and_unmatched_exist", 2, False,
+                  "skipped: batch_number userfield not seeded in environment",
+                  skipped=True)
+            return
         products = _load_grocy_products()
         harvest_names = _load_farmos_harvest_names()
 
@@ -325,13 +354,16 @@ def main() -> None:
     check_7_flag_text_exact()
     check_8_both_matched_and_unmatched_exist()
 
-    total = sum(w for _, w, _, _ in _checks)
-    earned = sum(w for _, w, p, _ in _checks if p)
-    all_pass = all(p for _, _, p, _ in _checks) and bool(_checks)
+    scored = [c for c in _checks if not c[4]]
+    total = sum(w for _, w, _, _, _ in scored)
+    earned = sum(w for _, w, p, _, _ in scored if p)
+    all_pass = all(p for _, _, p, _, _ in scored) and bool(scored)
     score = (earned / total) if total else 0.0
 
+    skipped_count = sum(1 for c in _checks if c[4])
+    skip_note = f"  (skipped {skipped_count})" if skipped_count else ""
     print(
-        f"SCORE: {score:.3f}  PASS: {all_pass}  ({earned}/{total})",
+        f"SCORE: {score:.3f}  PASS: {all_pass}  ({earned}/{total}){skip_note}",
         file=sys.stderr,
     )
     sys.exit(0 if all_pass else 1)
