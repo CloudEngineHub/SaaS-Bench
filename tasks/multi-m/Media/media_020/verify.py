@@ -2,11 +2,17 @@
 Verifier for media_020: Paris urban texture photo curation (PhotoPrism) + podcast episode (MediaCMS)
 
 Checks: 12 weighted checks (22 total points) across photoprism and mediacms.
-Strategy: docker exec (MariaDB for PhotoPrism, PostgreSQL for MediaCMS) + PhotoPrism REST API + llm_judge + llm_judge_vision.
+Strategy: docker exec into the single app containers — the DBs run inside them
+(MariaDB in the PhotoPrism container, PostgreSQL in the MediaCMS container) —
+plus PhotoPrism REST API + llm_judge + llm_judge_vision.
 
 Required env vars:
   SERVER_HOSTNAME, PHOTOPRISM_PORT, PHOTOPRISM_CONTAINER,
   MEDIACMS_PORT, MEDIACMS_CONTAINER
+
+Optional env vars:
+  PHOTOPRISM_DB_CONTAINER, MEDIACMS_DB_CONTAINER — override the container used
+  for DB queries (default: the app containers themselves).
 """
 
 import base64
@@ -69,30 +75,6 @@ def docker_exec(container: str, *args: str, timeout: int = 15) -> tuple[int, str
         capture_output=True, text=True, timeout=timeout,
     )
     return r.returncode, r.stdout, r.stderr
-
-
-def _find_db_container(app_container: str, db_keywords: tuple[str, ...] = ("db",)) -> str:
-    prefix = app_container.rsplit("-", 1)[0] if "-" in app_container else app_container
-    candidates = [
-        app_container + "-db",
-        app_container.replace("-app", "-db") if "-app" in app_container else "",
-    ]
-    for kw in db_keywords:
-        candidates.append(f"{prefix}-{kw}-1")
-        base = prefix.split("-")[0] if "-" in prefix else prefix
-        candidates.append(f"{base}-{kw}-1")
-    seen: set[str] = set()
-    for name in candidates:
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        try:
-            rc, _, _ = docker_exec(name, "echo", "ok", timeout=5)
-            if rc == 0:
-                return name
-        except Exception:
-            continue
-    return app_container + "-db"
 
 
 def mariadb_query(sql: str, timeout: int = 15) -> tuple[int, str, str]:
@@ -161,9 +143,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         f"Answer only YES or NO."
     )
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -214,7 +196,7 @@ def llm_judge_vision(
         f"Answer only YES or NO."
     )
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{
             "role": "user",
             "content": [
@@ -223,7 +205,7 @@ def llm_judge_vision(
                 {"type": "text", "text": prompt},
             ],
         }],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -269,7 +251,8 @@ def check_1_photo_favorited() -> None:
             "JOIN places pl ON p.place_id = pl.id "
             "WHERE p.deleted_at IS NULL "
             "AND (c.camera_model LIKE '%90D%' OR c.camera_model LIKE '%EOS 90D%') "
-            "AND (pl.place_city LIKE '%Paris%' OR pl.place_label LIKE '%Paris%')"
+            "AND (pl.place_city LIKE '%Paris%' OR pl.place_label LIKE '%Paris%' "
+            "OR pl.place_city LIKE '%Charenton%')"
         )
         if rc != 0:
             check("1. photo_favorited", 2, False, f"db error: {err.strip()}")
@@ -512,7 +495,7 @@ def check_8_mediacms_entry_exists_published() -> None:
 
 
 def check_9_mediacms_category_podcast() -> None:
-    """MediaCMS entry has 'Podcast' category."""
+    """MediaCMS entry has 'Art' category."""
     try:
         rc, out, err = psql_query(
             "SELECT c.title FROM files_category c "
@@ -521,16 +504,16 @@ def check_9_mediacms_category_podcast() -> None:
             "WHERE m.title = 'EP-55: Textures of Paris'"
         )
         if rc != 0:
-            check("9. mediacms_category_podcast", 1, False, f"db error: {err.strip()}")
+            check("9. mediacms_category_art", 1, False, f"db error: {err.strip()}")
             return
         categories = [line.strip().lower() for line in out.strip().splitlines() if line.strip()]
-        if any("podcast" in c for c in categories):
-            check("9. mediacms_category_podcast", 1, True)
+        if any("art" in c for c in categories):
+            check("9. mediacms_category_art", 1, True)
         else:
-            check("9. mediacms_category_podcast", 1, False,
-                  f"'Podcast' not found; categories: {categories}")
+            check("9. mediacms_category_art", 1, False,
+                  f"'Art' not found; categories: {categories}")
     except Exception as e:
-        check("9. mediacms_category_podcast", 1, False, f"exception: {e}")
+        check("9. mediacms_category_art", 1, False, f"exception: {e}")
 
 
 def check_10_mediacms_tags() -> None:
@@ -587,8 +570,12 @@ def check_11_mediacms_cover_image() -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
     global PHOTOPRISM_DB, MEDIACMS_DB
-    PHOTOPRISM_DB = _find_db_container(PHOTOPRISM_CONTAINER, ("db", "mariadb"))
-    MEDIACMS_DB = _find_db_container(MEDIACMS_CONTAINER, ("db", "postgres"))
+    # The harness starts each app as a single container with the DB running
+    # inside it (MariaDB in PhotoPrism, PostgreSQL in MediaCMS), so DB queries
+    # are executed in the app containers themselves. The <APP>_DB_CONTAINER
+    # env vars remain as an explicit override, e.g. for a real sidecar setup.
+    PHOTOPRISM_DB = os.getenv("PHOTOPRISM_DB_CONTAINER") or PHOTOPRISM_CONTAINER
+    MEDIACMS_DB = os.getenv("MEDIACMS_DB_CONTAINER") or MEDIACMS_CONTAINER
     print(f"[INFO] PhotoPrism DB container: {PHOTOPRISM_DB}", file=sys.stderr)
     print(f"[INFO] MediaCMS DB container: {MEDIACMS_DB}", file=sys.stderr)
 

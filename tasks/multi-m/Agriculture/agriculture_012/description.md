@@ -1,35 +1,35 @@
 **Task Requirements:**
 
-Step 1 — Create a new wine record in e-label with all mandatory compliance fields:
+Create the EU-compliant digital wine label for the estate's organic Chardonnay 2023 in e-label.
+
+The product form has two levels: a short **Create** form first, and a full **Edit** form (with the remaining sections) that becomes available after the record is created.
+
+Step 1 — Create the wine record (Products → New product) with these exact values:
 
 | Field | Required value |
 |-------|---------------|
-| Producer | Farm/winery name as recorded in FarmOS (must match exactly) |
-| Vintage | 2023 |
-| AOC / Appellation | The certified organic production region for this farm |
-| Grape Variety | Pinot Noir, 100% |
-| Alcohol % | Must use format "13.5% vol" (not "13.5%" or "13.5度") |
-| Net Volume | 750 mL |
-| Allergens | Must include the text "Sulphites" or "亚硫酸盐" (exact substring) |
+| Product name | `Boutique Organic Chardonnay` (do NOT include the vintage year in the name; the year goes in the separate Vintage field) |
+| Net volume | `0.75` (the field expects **liters**: 750 mL = 0.75 L) |
+| Vintage | `2023` |
+| Type | `White` (this Chardonnay is a still white wine) |
+| Appellation | `Loire` |
+| Alcohol | `12.5` (enter the plain number; the public label renders it as "12.5 % vol.") |
 
-All seven mandatory fields must be non-empty. Missing even one makes the label non-compliant.
+Step 2 — Open the new product's **Edit** form (Products → the new record → Edit, or via its Details page) and complete:
 
-Step 2 — Fill consumer-facing sensory fields using sommelier-level domain inference:
-Based on the declared grape variety (Pinot Noir) and its known profile, complete the following fields. Values must be grounded in Pinot Noir's actual characteristics — not generic defaults:
+- **Certifications** section → tick **Organic** (this wine is certified organic)
+- **Food Business Operator** section → Name: `Boutique Organic Farm`
+- **Ingredients** section → add the predefined ingredient `Sulphites` from the ingredient list (it is flagged as an allergen, which satisfies the EU allergen declaration)
 
-- Serving temperature: Pinot Noir is a light-bodied red; correct range is 12–16°C (not the 8–10°C used for white wines)
-- Glass type: Burgundy glass (not Bordeaux glass — Pinot Noir's aromatics require a wider bowl)
-- Food pairings: at least 2 specific dish names appropriate for Pinot Noir (e.g. duck breast with cherry sauce, mushroom risotto, Burgundy-style beef)
-- Tasting description: ≤100 characters; must mention at least one of: aroma profile, tannin level, acidity, or finish of Pinot Noir
+Step 3 — Publish the label from the product's **Details** page:
 
-Step 3 — Export / generate the digital label preview with QR code:
-After saving the record, trigger the QR-code PDF export. The output must contain a functional, scannable QR code embedded in the document — not a decorative graphic.
+- The Details page shows the auto-generated public e-label page link; open it and confirm it displays the wine data, including the alcohol shown as "12.5 % vol.".
+- Download the product's QR code (SVG, PNG or JPEG) from the same Details page — this is the label's QR-code export.
 
 **Steps:**
-1. In e-label, create a new wine record. Fill all 7 mandatory compliance fields as specified.
-2. Use Pinot Noir domain knowledge to fill serving temperature (12–16°C), glass type (Burgundy), food pairings (≥2 specific dishes), and tasting description (≤100 chars mentioning aroma/tannin/acidity/finish).
-3. Verify the Producer field exactly matches the farm/winery name already in FarmOS before saving.
-4. Export the e-label record as a QR-code PDF.
+1. In e-label, create the `Boutique Organic Chardonnay` record with the exact Step-1 values (name without vintage; volume in liters; Type White).
+2. On the product's Edit form, enable the Organic certification, set the Food Business Operator name to `Boutique Organic Farm`, and add the predefined `Sulphites` ingredient.
+3. Open the product's Details page, confirm the public e-label page renders with the alcohol shown as "% vol.", and download the QR code.
 
 **Login Credentials:**
 

@@ -1,5 +1,5 @@
 """
-Verifier for media_029: Scream poster → Watcharr watch log + SiYuan EP-56 script.
+Verifier for media_029: Joker poster → Watcharr watch log + SiYuan EP-56 script.
 
 Checks: 11 weighted checks (18 total points) across watcharr, siyuan.
 Strategy: watcharr via docker exec SQLite; siyuan via REST API; llm_judge + llm_judge_vision.
@@ -44,7 +44,7 @@ _INPUTS_DIR = os.path.join(
 )
 
 INPUT_FILES: list[str] = [
-    os.path.join(_INPUTS_DIR, "watcharr_poster_007.jpg"),
+    os.path.join(_INPUTS_DIR, "watcharr_poster_386.jpg"),
 ]
 
 # ── Result accumulator ────────────────────────────────────────────────────────
@@ -136,6 +136,52 @@ def siyuan_sql(stmt: str) -> list[dict]:
     return body.get("data") or []
 
 
+def siyuan_export_md(doc_id: str) -> str:
+    """Export a document's markdown in TRUE document order.
+
+    NOTE: the blocks table's `sort` column is grouped by block type (headings,
+    paragraphs, lists), NOT document order — section extraction from
+    `ORDER BY sort` yields headings first and prose last, i.e. empty sections.
+    exportMdContent returns the document in real reading order.
+    """
+    payload = json.dumps({"id": doc_id}).encode()
+    headers = {"Content-Type": "application/json"}
+    token = get_siyuan_token()
+    if token:
+        headers["Authorization"] = f"Token {token}"
+    req = urllib.request.Request(
+        f"{SIYUAN_API}/api/export/exportMdContent",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"SiYuan export HTTP {e.code}: {e.read().decode()[:200]}")
+    if body.get("code") != 0:
+        raise RuntimeError(f"SiYuan export error: {body.get('msg', body)}")
+    return body.get("data", {}).get("content", "")
+
+
+def md_sections(md: str) -> list[tuple[int, str, list[str]]]:
+    """Split markdown into (heading_level, heading_text, body_lines) sections."""
+    sections: list[tuple[int, str, list[str]]] = []
+    current: list | None = None
+    for line in md.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if m:
+            if current is not None:
+                sections.append((current[0], current[1], current[2]))
+            current = [len(m.group(1)), m.group(2).strip(), []]
+        elif current is not None:
+            current[2].append(line)
+    if current is not None:
+        sections.append((current[0], current[1], current[2]))
+    return sections
+
+
 def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, str]:
     api_base = os.getenv("MINDRA_BASE_URL", "https://api.mindracode.com/v1")
     api_key = os.getenv("MINDRA_API_KEY", "")
@@ -146,9 +192,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         f"Answer only YES or NO."
     )
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -203,9 +249,9 @@ def llm_judge_vision(
         {"type": "text", "text": prompt},
     ]
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": msg_content}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -242,18 +288,19 @@ def check_0_input_files_exist() -> None:
         check("0. input_files_exist", 1, True)
 
 
-def check_1_watcharr_scream_exists() -> None:
+def check_1_watcharr_joker_exists() -> None:
     global _watcharr_row
     try:
         rows = watcharr_sql(
             "SELECT w.status, w.rating, w.thoughts, c.title "
             "FROM watcheds w JOIN contents c ON w.content_id = c.id "
-            "WHERE LOWER(c.title) LIKE '%scream%' "
-            "AND w.deleted_at IS NULL LIMIT 1;"
+            "JOIN users u ON w.user_id = u.id "
+            "WHERE LOWER(c.title) LIKE '%joker%' AND u.username = 'admin' "
+            "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC LIMIT 1;"
         )
         if not rows:
-            check("1. watcharr_scream_exists", 2, False,
-                  "no watched entry for Scream found")
+            check("1. watcharr_joker_exists", 2, False,
+                  "no watched entry for Joker found")
             return
         parts = rows.split("|", 3)
         _watcharr_row = {
@@ -262,10 +309,10 @@ def check_1_watcharr_scream_exists() -> None:
             "thoughts": parts[2] if len(parts) > 2 else "",
             "title": parts[3] if len(parts) > 3 else "",
         }
-        check("1. watcharr_scream_exists", 2, True,
+        check("1. watcharr_joker_exists", 2, True,
               f"found: {_watcharr_row['title']}")
     except Exception as e:
-        check("1. watcharr_scream_exists", 2, False, f"exception: {e}")
+        check("1. watcharr_joker_exists", 2, False, f"exception: {e}")
 
 
 def check_2_watcharr_status_watched() -> None:
@@ -312,29 +359,29 @@ def check_4_watcharr_review_length() -> None:
         check("4. watcharr_review_length", 1, False, f"exception: {e}")
 
 
-def check_5_watcharr_review_meta_commentary() -> None:
+def check_5_watcharr_review_descent_analysis() -> None:
     try:
         if not _watcharr_row:
-            check("5. watcharr_review_meta_commentary", 2, False,
+            check("5. watcharr_review_descent_analysis", 2, False,
                   "no watched row available")
             return
         thoughts = _watcharr_row["thoughts"]
         if not thoughts or len(thoughts) < 20:
-            check("5. watcharr_review_meta_commentary", 2, False,
+            check("5. watcharr_review_descent_analysis", 2, False,
                   "review too short for analysis")
             return
         condition = (
-            "The review discusses how the film Scream uses meta-commentary, self-awareness, "
-            "or genre deconstruction to subvert traditional slasher film narrative structures. "
-            "It should go beyond generic praise and address specific ways the film plays with "
-            "horror conventions, such as its characters' awareness of horror movie rules, "
-            "its satirical take on the genre, or its commentary on slasher tropes."
+            "The review analyzes how the film Joker (2019) uses cinematography, score, "
+            "or Joaquin Phoenix's physical performance to portray Arthur Fleck's "
+            "psychological descent. It should go beyond generic praise and address "
+            "specific techniques, such as the dance sequences, the use of staircases "
+            "and shadows, or the transformation of laughter into menace."
         )
         passed, raw = llm_judge(thoughts, condition)
-        check("5. watcharr_review_meta_commentary", 2, passed,
+        check("5. watcharr_review_descent_analysis", 2, passed,
               f"llm_judge={raw[:60]}")
     except Exception as e:
-        check("5. watcharr_review_meta_commentary", 2, False, f"exception: {e}")
+        check("5. watcharr_review_descent_analysis", 2, False, f"exception: {e}")
 
 
 def check_6_cross_modal_film_identity() -> None:
@@ -351,7 +398,7 @@ def check_6_cross_modal_film_identity() -> None:
         condition = (
             "The movie poster shown in the image is for the film whose title "
             "matches the recorded value. The poster should be identifiable as "
-            "a Scream franchise movie poster."
+            "a poster for the 2019 film 'Joker' starring Joaquin Phoenix."
         )
         passed, raw = llm_judge_vision(INPUT_FILES[0], title, condition)
         check("6. cross_modal_film_identity", 2, passed,
@@ -366,12 +413,12 @@ def check_7_siyuan_ep56_exists() -> None:
         rows = siyuan_sql(
             "SELECT id, content, box FROM blocks WHERE type = 'd' "
             "AND (content LIKE '%EP-56%' OR content LIKE '%ep-56%' "
-            "OR content LIKE '%EP56%' OR content LIKE '%Meta-Slasher%' "
-            "OR content LIKE '%Meta Slasher%') LIMIT 5"
+            "OR content LIKE '%EP56%' OR content LIKE '%Descent%' "
+            "OR content LIKE '%Anatomy%') LIMIT 5"
         )
         if not rows:
             check("7. siyuan_ep56_exists", 2, False,
-                  "no document matching EP-56 or Meta-Slasher found")
+                  "no document matching EP-56 found")
             return
         for row in rows:
             title = row.get("content", "")
@@ -391,39 +438,19 @@ def check_8_siyuan_thesis_section() -> None:
         if not _ep56_root_id:
             check("8. siyuan_thesis_section", 2, False, "EP-56 doc not found")
             return
-        blocks = siyuan_sql(
-            f"SELECT type, subtype, content, markdown FROM blocks "
-            f"WHERE root_id = '{_ep56_root_id}' AND type != 'd' "
-            f"ORDER BY sort"
-        )
-        if not blocks:
-            check("8. siyuan_thesis_section", 2, False, "no blocks found in EP-56 doc")
+        md = siyuan_export_md(_ep56_root_id)
+        if not md.strip():
+            check("8. siyuan_thesis_section", 2, False, "no content in EP-56 doc")
             return
-
-        thesis_heading_idx = -1
-        for i, b in enumerate(blocks):
-            content = b.get("content", "").lower()
-            if b.get("type") == "h" and "thesis" in content:
-                thesis_heading_idx = i
+        combined = ""
+        for _lvl, title, lines in md_sections(md):
+            if "thesis" in title.lower():
+                combined = " ".join(l.strip() for l in lines if l.strip())
                 break
-
-        if thesis_heading_idx < 0:
+        else:
             check("8. siyuan_thesis_section", 2, False,
                   "no 'Thesis' heading found in EP-56")
             return
-
-        heading_level = blocks[thesis_heading_idx].get("subtype", "h2")
-        thesis_content = []
-        for b in blocks[thesis_heading_idx + 1:]:
-            if b.get("type") == "h":
-                b_sub = b.get("subtype", "h9")
-                if b_sub <= heading_level:
-                    break
-            text = b.get("markdown", "") or b.get("content", "")
-            if text.strip():
-                thesis_content.append(text.strip())
-
-        combined = " ".join(thesis_content)
         char_count = len(combined)
         passed = char_count >= 100
         detail = f"char_count={char_count}" if passed else (
@@ -433,86 +460,44 @@ def check_8_siyuan_thesis_section() -> None:
         check("8. siyuan_thesis_section", 2, False, f"exception: {e}")
 
 
-def check_9_siyuan_trope_deconstruction_section() -> None:
+def check_9_siyuan_descent_beats_section() -> None:
     try:
         if not _ep56_root_id:
-            check("9. siyuan_trope_deconstruction", 2, False, "EP-56 doc not found")
+            check("9. siyuan_descent_beats", 2, False, "EP-56 doc not found")
             return
-        blocks = siyuan_sql(
-            f"SELECT type, subtype, content, markdown FROM blocks "
-            f"WHERE root_id = '{_ep56_root_id}' AND type != 'd' "
-            f"ORDER BY sort"
-        )
-        if not blocks:
-            check("9. siyuan_trope_deconstruction", 2, False,
-                  "no blocks found in EP-56 doc")
+        md = siyuan_export_md(_ep56_root_id)
+        if not md.strip():
+            check("9. siyuan_descent_beats", 2, False,
+                  "no content in EP-56 doc")
             return
-
-        trope_heading_idx = -1
-        for i, b in enumerate(blocks):
-            content = b.get("content", "").lower()
-            if b.get("type") == "h" and "trope" in content and "deconstruction" in content:
-                trope_heading_idx = i
+        body_lines: list[str] | None = None
+        for _lvl, title, lines in md_sections(md):
+            tl = title.lower()
+            if "descent" in tl and "beats" in tl:
+                body_lines = lines
                 break
-        if trope_heading_idx < 0:
-            for i, b in enumerate(blocks):
-                content = b.get("content", "").lower()
-                if b.get("type") == "h" and "trope" in content:
-                    trope_heading_idx = i
+        if body_lines is None:
+            for _lvl, title, lines in md_sections(md):
+                if "descent" in title.lower():
+                    body_lines = lines
                     break
-
-        if trope_heading_idx < 0:
-            check("9. siyuan_trope_deconstruction", 2, False,
-                  "no 'Trope Deconstruction' heading found")
+        if body_lines is None:
+            check("9. siyuan_descent_beats", 2, False,
+                  "no 'Descent Beats' heading found")
             return
-
-        heading_level = blocks[trope_heading_idx].get("subtype", "h2")
-        section_blocks = []
-        for b in blocks[trope_heading_idx + 1:]:
-            if b.get("type") == "h":
-                b_sub = b.get("subtype", "h9")
-                if b_sub <= heading_level:
-                    break
-            section_blocks.append(b)
-
-        numbered_items = 0
-        for b in section_blocks:
-            md = b.get("markdown", "") or b.get("content", "")
-            btype = b.get("type", "")
-            if btype in ("l", "i"):
-                items = [line for line in md.split("\n")
-                         if re.match(r'^\s*\d+[\.\)]\s', line)]
-                numbered_items += len(items)
-            elif btype == "p":
-                if re.match(r'^\s*\d+[\.\)]\s', md):
-                    numbered_items += 1
-
+        section_text = "\n".join(body_lines)
+        numbered_items = len(re.findall(r"(?:^|\n)\s*\d+[\.\)]\s", section_text))
         if numbered_items < 3:
-            all_text = "\n".join(
-                b.get("markdown", "") or b.get("content", "")
-                for b in section_blocks
+            numbered_items = max(
+                numbered_items,
+                len(re.findall(r"(?:^|\n)\s*[-*•]\s", section_text)),
             )
-            list_like = re.findall(r'(?:^|\n)\s*\d+[\.\)]\s', all_text)
-            numbered_items = max(numbered_items, len(list_like))
-
-        if numbered_items < 3:
-            total_items = 0
-            for b in section_blocks:
-                btype = b.get("type", "")
-                if btype in ("l", "i"):
-                    md = b.get("markdown", "") or b.get("content", "")
-                    total_items += len([
-                        line for line in md.split("\n")
-                        if re.match(r'^\s*[-*•]\s', line) or re.match(r'^\s*\d+[\.\)]\s', line)
-                    ])
-            numbered_items = max(numbered_items, total_items)
-
         passed = numbered_items >= 3
         detail = f"items={numbered_items}" if passed else (
             f"items={numbered_items}, need >=3")
-        check("9. siyuan_trope_deconstruction", 2, passed, detail)
+        check("9. siyuan_descent_beats", 2, passed, detail)
     except Exception as e:
-        check("9. siyuan_trope_deconstruction", 2, False, f"exception: {e}")
+        check("9. siyuan_descent_beats", 2, False, f"exception: {e}")
 
 
 def check_10_siyuan_watcharr_link() -> None:
@@ -566,15 +551,15 @@ def check_10_siyuan_watcharr_link() -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
     check_0_input_files_exist()
-    check_1_watcharr_scream_exists()
+    check_1_watcharr_joker_exists()
     check_2_watcharr_status_watched()
     check_3_watcharr_rating_7_5()
     check_4_watcharr_review_length()
-    check_5_watcharr_review_meta_commentary()
+    check_5_watcharr_review_descent_analysis()
     check_6_cross_modal_film_identity()
     check_7_siyuan_ep56_exists()
     check_8_siyuan_thesis_section()
-    check_9_siyuan_trope_deconstruction_section()
+    check_9_siyuan_descent_beats_section()
     check_10_siyuan_watcharr_link()
 
     total = sum(w for _, w, _, _ in _checks)

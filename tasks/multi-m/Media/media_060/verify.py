@@ -143,9 +143,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         f"Answer only YES or NO."
     )
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -194,7 +194,7 @@ def llm_judge_vision(
         f"Answer only YES or NO."
     )
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{
             "role": "user",
             "content": [
@@ -203,7 +203,7 @@ def llm_judge_vision(
                 {"type": "text", "text": prompt},
             ],
         }],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -250,19 +250,25 @@ def check_1_watcharr_spiderman_exists():
         rows = watcharr_sql(
             "SELECT w.status, w.rating, w.thoughts, c.title "
             "FROM watcheds w JOIN contents c ON w.content_id = c.id "
-            "WHERE LOWER(c.title) LIKE '%spider-man%no way home%' LIMIT 1;"
+            "JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
+            "WHERE LOWER(c.title) LIKE '%spider-man%no way home%' "
+            "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC LIMIT 1;"
         )
         if not rows:
             rows = watcharr_sql(
                 "SELECT w.status, w.rating, w.thoughts, c.title "
                 "FROM watcheds w JOIN contents c ON w.content_id = c.id "
-                "WHERE LOWER(c.title) LIKE '%spider%man%' AND LOWER(c.title) LIKE '%no way%' LIMIT 1;"
+                "JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
+                "WHERE LOWER(c.title) LIKE '%spider%man%' AND LOWER(c.title) LIKE '%no way%' "
+                "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC LIMIT 1;"
             )
         if not rows:
             rows = watcharr_sql(
                 "SELECT w.status, w.rating, w.thoughts, c.title "
                 "FROM watcheds w JOIN contents c ON w.content_id = c.id "
-                "WHERE LOWER(c.title) LIKE '%spider%man%' LIMIT 1;"
+                "JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
+                "WHERE LOWER(c.title) LIKE '%spider%man%' "
+                "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC LIMIT 1;"
             )
         if not rows:
             check("1. watcharr_spiderman_exists", 2, False, "no watched entry for Spider-Man: No Way Home")
@@ -349,6 +355,10 @@ def check_6_cross_modal_poster_matches():
             return
         title = _watcharr_row["title"]
         thoughts = _watcharr_row["thoughts"]
+        if not thoughts.strip():
+            check("6. cross_modal_poster_matches", 2, False,
+                  "no review recorded to compare against poster")
+            return
         recorded = f"Title: {title}. Review: {thoughts[:200]}"
         condition = (
             "The movie poster shown is for Spider-Man: No Way Home, and the recorded "

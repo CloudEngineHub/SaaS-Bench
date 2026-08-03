@@ -144,7 +144,7 @@ def llm_judge_vision(
     )
     try:
         payload = json.dumps({
-            "model": "gemini-3.0-flash-preview",
+            "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
             "messages": [{
                 "role": "user",
                 "content": [
@@ -153,7 +153,7 @@ def llm_judge_vision(
                     {"type": "text", "text": prompt},
                 ],
             }],
-            "max_tokens": 10,
+            "max_tokens": 512,
         }).encode()
         req = urllib.request.Request(
             f"{api_base}/chat/completions",

@@ -1,8 +1,9 @@
 """
-Verifier for agriculture_021: Organic audit — cross-reference Grocy product batch numbers
-against FarmOS harvest logs; flag unmatched products.
+Verifier for agriculture_021: Cross-app batch audit — check the receiving
+office's delivery manifest (Grocy product -> batch number) against FarmOS
+harvest log names; flag products whose batch number matches no harvest log.
 
-Checks: 8 weighted checks (14 total points) across grocy, farmos.
+Checks: 6 weighted checks (12 total points) across grocy, farmos.
 Strategy: grocy=docker exec PHP PDO (SQLite); farmos=docker exec PHP PDO (SQLite)
 
 Required env vars:
@@ -42,18 +43,31 @@ GROCY_DB_CANDIDATES = [
 
 AUDIT_FLAG = "AUDIT FLAG: Missing FarmOS harvest log"
 
+# Delivery manifest from the task description: exact Grocy product name ->
+# batch number. Matched entries reference FarmOS harvest logs that exist
+# verbatim; unmatched entries reference harvest logs that do NOT exist.
+MANIFEST_MATCHED = {
+    "Sliced Beets": "2024 Beet Harvest — North Field Center Bed",
+    "Strawberries": "2024 Strawberry Harvest — Peak Week June 15",
+    "Whole Kernel Corn": "2024 Sweet Corn Harvest — South Field 1",
+    "Cherry Tomatoes By Sainsburys": "2024 Cherry Tomato Harvest — North Field West Bed 1",
+    "Organic Peas & Shoestring Carrots": "2024 Carrot Harvest — North Field Center Bed 1",
+}
+MANIFEST_UNMATCHED = {
+    "Organic Green Beans": "2024 Green Bean Harvest — North Field East Bed 1",
+    "Chestnut Mushrooms": "2024 Chestnut Mushroom Harvest — West Greenhouse 1",
+    "Shreds Iceberg": "2024 Iceberg Lettuce Harvest — North Field East Bed 2",
+}
+
 # ── Result accumulator ────────────────────────────────────────────────────────
-_checks: list[tuple[str, int, bool, str, bool]] = []
+_checks: list[tuple[str, int, bool, str]] = []
 
 
-def check(label: str, weight: int, passed: bool, detail: str = "", *, skipped: bool = False) -> None:
-    _checks.append((label, weight, passed, detail, skipped))
+def check(label: str, weight: int, passed: bool, detail: str = "") -> None:
+    _checks.append((label, weight, passed, detail))
+    status = "PASS" if passed else "FAIL"
     tail = f"  ({detail})" if detail else ""
-    if skipped:
-        print(f"[SKIP] (0/{weight}pt) {label}{tail}", file=sys.stderr)
-    else:
-        status = "PASS" if passed else "FAIL"
-        print(f"[{status}] ({weight}pt) {label}{tail}", file=sys.stderr)
+    print(f"[{status}] ({weight}pt) {label}{tail}", file=sys.stderr)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -119,50 +133,29 @@ def farmos_sql_json(query: str) -> list[dict]:
 
 
 # ── Cached state ──────────────────────────────────────────────────────────────
-_grocy_products_with_batch: list[dict] = []
-_farmos_harvest_names: set[str] = set()
-_batch_userfield_seeded_cache: bool | None = None
+_products_by_name: dict[str, dict] | None = None
+_farmos_harvest_names: set[str] | None = None
 
 
-def _batch_userfield_seeded() -> bool:
-    """Returns True iff the `batch_number` userfield is registered on `products`."""
-    global _batch_userfield_seeded_cache
-    if _batch_userfield_seeded_cache is not None:
-        return _batch_userfield_seeded_cache
-    try:
-        rows = grocy_sql_json(
-            "SELECT 1 FROM userfields WHERE entity = 'products' AND name = 'batch_number'"
-        )
-        _batch_userfield_seeded_cache = len(rows) > 0
-    except Exception:
-        _batch_userfield_seeded_cache = False
-    return _batch_userfield_seeded_cache
-
-
-def _load_grocy_products() -> list[dict]:
-    global _grocy_products_with_batch
-    if _grocy_products_with_batch:
-        return _grocy_products_with_batch
-
+def _load_manifest_products() -> dict[str, dict]:
+    """Grocy products referenced by the manifest, keyed by exact name."""
+    global _products_by_name
+    if _products_by_name is not None:
+        return _products_by_name
+    names = list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+    quoted = ", ".join("'" + n.replace("'", "''") + "'" for n in names)
     rows = grocy_sql_json(
-        "SELECT p.id, p.name, p.description, ufv.value AS batch_number "
-        "FROM products p "
-        "JOIN userfield_values ufv ON ufv.object_id = p.id "
-        "JOIN userfields uf ON uf.id = ufv.field_id "
-        "WHERE uf.entity = 'products' "
-        "AND uf.name = 'batch_number' "
-        "AND ufv.value IS NOT NULL "
-        "AND TRIM(ufv.value) != ''"
+        "SELECT id, name, COALESCE(description, '') AS description "
+        f"FROM products WHERE name IN ({quoted})"
     )
-    _grocy_products_with_batch = rows
-    return rows
+    _products_by_name = {r["name"]: r for r in rows}
+    return _products_by_name
 
 
 def _load_farmos_harvest_names() -> set[str]:
     global _farmos_harvest_names
-    if _farmos_harvest_names:
+    if _farmos_harvest_names is not None:
         return _farmos_harvest_names
-
     rows = farmos_sql_json(
         "SELECT name FROM log_field_data WHERE type = 'harvest'"
     )
@@ -171,199 +164,155 @@ def _load_farmos_harvest_names() -> set[str]:
 
 
 # ── Individual checks ─────────────────────────────────────────────────────────
-def check_1_grocy_batch_products_retrievable() -> None:
+def check_1_manifest_products_exist() -> None:
+    """All 8 manifest products exist in Grocy (exact name)."""
     try:
-        products = _load_grocy_products()
-        check("1. grocy_batch_products_retrievable", 1, True,
-              f"found {len(products)} products with batch_number userfield")
+        products = _load_manifest_products()
+        missing = [n for n in list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+                   if n not in products]
+        check("1. manifest_products_exist", 1, not missing,
+              f"found {len(products)}/8 manifest products" if not missing
+              else f"missing products: {'; '.join(missing)}")
     except Exception as e:
-        check("1. grocy_batch_products_retrievable", 1, False, f"exception: {e}")
+        check("1. manifest_products_exist", 1, False, f"exception: {e}")
 
 
-def check_2_farmos_harvest_logs_retrievable() -> None:
+def check_2_farmos_logs_match_manifest() -> None:
+    """FarmOS harvest logs are retrievable and consistent with the manifest:
+    every matched batch number exists verbatim, no unmatched one does."""
     try:
         names = _load_farmos_harvest_names()
-        check("2. farmos_harvest_logs_retrievable", 1, True,
-              f"found {len(names)} harvest log names")
-    except Exception as e:
-        check("2. farmos_harvest_logs_retrievable", 1, False, f"exception: {e}")
-
-
-def check_3_at_least_one_batch_product() -> None:
-    try:
-        if not _batch_userfield_seeded():
-            check("3. at_least_one_batch_product", 1, False,
-                  "skipped: batch_number userfield not seeded in environment",
-                  skipped=True)
+        if not names:
+            check("2. farmos_logs_match_manifest", 1, False,
+                  "no harvest logs found in farmos")
             return
-        products = _load_grocy_products()
-        check("3. at_least_one_batch_product", 1, len(products) > 0,
-              f"count={len(products)}" if products else "no products with batch_number found")
+        missing = [b for b in MANIFEST_MATCHED.values() if b not in names]
+        unexpected = [b for b in MANIFEST_UNMATCHED.values() if b in names]
+        problems = []
+        if missing:
+            problems.append(f"expected logs missing: {'; '.join(missing)}")
+        if unexpected:
+            problems.append(f"unexpected logs present: {'; '.join(unexpected)}")
+        check("2. farmos_logs_match_manifest", 1, not problems,
+              f"{len(names)} harvest logs; manifest references consistent"
+              if not problems else " — ".join(problems))
     except Exception as e:
-        check("3. at_least_one_batch_product", 1, False, f"exception: {e}")
+        check("2. farmos_logs_match_manifest", 1, False, f"exception: {e}")
 
 
-def check_4_at_least_one_harvest_log() -> None:
+def check_3_unmatched_products_flagged() -> None:
+    """Every manifest product whose batch number has no FarmOS harvest log
+    carries the exact audit flag in its description."""
     try:
-        names = _load_farmos_harvest_names()
-        check("4. at_least_one_harvest_log", 1, len(names) > 0,
-              f"count={len(names)}" if names else "no harvest logs found in farmos")
-    except Exception as e:
-        check("4. at_least_one_harvest_log", 1, False, f"exception: {e}")
-
-
-def check_5_unmatched_products_flagged() -> None:
-    try:
-        products = _load_grocy_products()
-        harvest_names = _load_farmos_harvest_names()
-
-        unmatched = [
-            p for p in products
-            if p["batch_number"].strip() not in harvest_names
-        ]
-
-        if not unmatched:
-            check("5. unmatched_products_flagged", 3, True,
-                  "no unmatched products to flag")
-            return
-
+        products = _load_manifest_products()
         missing_flag = []
-        for p in unmatched:
-            desc = p.get("description") or ""
-            if AUDIT_FLAG not in desc:
-                missing_flag.append(f"{p['name']} (batch={p['batch_number']})")
-
-        if missing_flag:
-            check("5. unmatched_products_flagged", 3, False,
-                  f"{len(missing_flag)} unmatched products lack flag: "
-                  + "; ".join(missing_flag[:5]))
-        else:
-            check("5. unmatched_products_flagged", 3, True,
-                  f"all {len(unmatched)} unmatched products correctly flagged")
+        for name in MANIFEST_UNMATCHED:
+            p = products.get(name)
+            if not p:
+                missing_flag.append(f"{name} (product not found)")
+            elif AUDIT_FLAG not in p["description"]:
+                missing_flag.append(name)
+        check("3. unmatched_products_flagged", 4, not missing_flag,
+              f"all {len(MANIFEST_UNMATCHED)} unmatched products flagged"
+              if not missing_flag
+              else f"unmatched products lacking flag: {'; '.join(missing_flag)}")
     except Exception as e:
-        check("5. unmatched_products_flagged", 3, False, f"exception: {e}")
+        check("3. unmatched_products_flagged", 4, False, f"exception: {e}")
 
 
-def check_6_matched_products_not_flagged() -> None:
+def check_4_matched_products_not_flagged() -> None:
+    """Products whose batch number exists in FarmOS must NOT be flagged.
+    Requires audit evidence first (at least one unmatched product flagged)."""
     try:
-        products = _load_grocy_products()
-        harvest_names = _load_farmos_harvest_names()
-
-        matched = [
-            p for p in products
-            if p["batch_number"].strip() in harvest_names
+        products = _load_manifest_products()
+        flagged_unmatched = [
+            name for name in MANIFEST_UNMATCHED
+            if products.get(name) and AUDIT_FLAG in products[name]["description"]
         ]
-
-        if not matched:
-            check("6. matched_products_not_flagged", 3, True,
-                  "no matched products to verify")
+        if not flagged_unmatched:
+            check("4. matched_products_not_flagged", 2, False,
+                  "no audit evidence: no unmatched product has been flagged yet")
             return
-
-        wrongly_flagged = []
-        for p in matched:
-            desc = p.get("description") or ""
-            if AUDIT_FLAG in desc:
-                wrongly_flagged.append(f"{p['name']} (batch={p['batch_number']})")
-
-        if wrongly_flagged:
-            check("6. matched_products_not_flagged", 3, False,
-                  f"{len(wrongly_flagged)} matched products wrongly flagged: "
-                  + "; ".join(wrongly_flagged[:5]))
-        else:
-            check("6. matched_products_not_flagged", 3, True,
-                  f"all {len(matched)} matched products correctly unflagged")
+        wrongly_flagged = [
+            name for name in MANIFEST_MATCHED
+            if products.get(name) and AUDIT_FLAG in products[name]["description"]
+        ]
+        check("4. matched_products_not_flagged", 2, not wrongly_flagged,
+              f"all {len(MANIFEST_MATCHED)} matched products correctly unflagged"
+              if not wrongly_flagged
+              else f"matched products wrongly flagged: {'; '.join(wrongly_flagged)}")
     except Exception as e:
-        check("6. matched_products_not_flagged", 3, False, f"exception: {e}")
+        check("4. matched_products_not_flagged", 2, False, f"exception: {e}")
 
 
-def check_7_flag_text_exact() -> None:
+def check_5_flag_appended_not_replaced() -> None:
+    """The flag is appended after the existing description text, not used as
+    a replacement for it."""
     try:
-        products = _load_grocy_products()
-        harvest_names = _load_farmos_harvest_names()
-
-        unmatched = [
-            p for p in products
-            if p["batch_number"].strip() not in harvest_names
+        products = _load_manifest_products()
+        flagged = [
+            (name, products[name]["description"])
+            for name in MANIFEST_UNMATCHED
+            if products.get(name) and AUDIT_FLAG in products[name]["description"]
         ]
-
-        if not unmatched:
-            check("7. flag_text_exact", 2, True, "no unmatched products to verify flag text")
-            return
-
-        flagged = [p for p in unmatched if AUDIT_FLAG in (p.get("description") or "")]
         if not flagged:
-            check("7. flag_text_exact", 2, False,
-                  "no flagged products found to verify exact text")
+            check("5. flag_appended_not_replaced", 2, False,
+                  "no flagged products found to verify append position")
             return
-
-        bad = []
-        for p in flagged:
-            desc = p.get("description") or ""
-            if AUDIT_FLAG in desc:
-                idx = desc.index(AUDIT_FLAG)
-                surrounding = desc[max(0, idx - 5):idx + len(AUDIT_FLAG) + 5]
-                if AUDIT_FLAG not in surrounding:
-                    bad.append(p["name"])
-            else:
-                bad.append(p["name"])
-
-        check("7. flag_text_exact", 2, len(bad) == 0,
-              f"all {len(flagged)} flagged products use exact flag text" if not bad
-              else f"inexact flag in: {'; '.join(bad[:3])}")
+        bad = [name for name, desc in flagged
+               if desc.index(AUDIT_FLAG) == 0]
+        check("5. flag_appended_not_replaced", 2, not bad,
+              f"all {len(flagged)} flagged products keep their original text"
+              if not bad
+              else f"flag replaces original description in: {'; '.join(bad)}")
     except Exception as e:
-        check("7. flag_text_exact", 2, False, f"exception: {e}")
+        check("5. flag_appended_not_replaced", 2, False, f"exception: {e}")
 
 
-def check_8_both_matched_and_unmatched_exist() -> None:
+def check_6_flag_targeting_exact() -> None:
+    """Store-wide, exactly the unmatched manifest products carry the flag —
+    no more, no fewer."""
     try:
-        if not _batch_userfield_seeded():
-            check("8. both_matched_and_unmatched_exist", 2, False,
-                  "skipped: batch_number userfield not seeded in environment",
-                  skipped=True)
-            return
-        products = _load_grocy_products()
-        harvest_names = _load_farmos_harvest_names()
-
-        if not products:
-            check("8. both_matched_and_unmatched_exist", 2, False,
-                  "no products with batch_number")
-            return
-
-        matched_count = sum(
-            1 for p in products
-            if p["batch_number"].strip() in harvest_names
+        rows = grocy_sql_json(
+            "SELECT name FROM products WHERE description LIKE "
+            "'%" + AUDIT_FLAG + "%'"
         )
-        unmatched_count = len(products) - matched_count
-
-        has_both = matched_count > 0 and unmatched_count > 0
-        check("8. both_matched_and_unmatched_exist", 2, has_both,
-              f"matched={matched_count}, unmatched={unmatched_count}"
-              + ("" if has_both else " — expected both >0 for a meaningful audit"))
+        flagged_names = {r["name"] for r in rows}
+        if not flagged_names:
+            check("6. flag_targeting_exact", 2, False,
+                  "no products flagged anywhere in grocy")
+            return
+        expected = set(MANIFEST_UNMATCHED)
+        extra = sorted(flagged_names - expected)
+        missing = sorted(expected - flagged_names)
+        problems = []
+        if extra:
+            problems.append(f"unexpected flags: {'; '.join(extra)}")
+        if missing:
+            problems.append(f"missing flags: {'; '.join(missing)}")
+        check("6. flag_targeting_exact", 2, not problems,
+              f"exactly the {len(expected)} unmatched products are flagged"
+              if not problems else " — ".join(problems))
     except Exception as e:
-        check("8. both_matched_and_unmatched_exist", 2, False, f"exception: {e}")
+        check("6. flag_targeting_exact", 2, False, f"exception: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
-    check_1_grocy_batch_products_retrievable()
-    check_2_farmos_harvest_logs_retrievable()
-    check_3_at_least_one_batch_product()
-    check_4_at_least_one_harvest_log()
-    check_5_unmatched_products_flagged()
-    check_6_matched_products_not_flagged()
-    check_7_flag_text_exact()
-    check_8_both_matched_and_unmatched_exist()
+    check_1_manifest_products_exist()
+    check_2_farmos_logs_match_manifest()
+    check_3_unmatched_products_flagged()
+    check_4_matched_products_not_flagged()
+    check_5_flag_appended_not_replaced()
+    check_6_flag_targeting_exact()
 
-    scored = [c for c in _checks if not c[4]]
-    total = sum(w for _, w, _, _, _ in scored)
-    earned = sum(w for _, w, p, _, _ in scored if p)
-    all_pass = all(p for _, _, p, _, _ in scored) and bool(scored)
+    total = sum(w for _, w, _, _ in _checks)
+    earned = sum(w for _, w, p, _ in _checks if p)
+    all_pass = all(p for _, _, p, _ in _checks) and bool(_checks)
     score = (earned / total) if total else 0.0
 
-    skipped_count = sum(1 for c in _checks if c[4])
-    skip_note = f"  (skipped {skipped_count})" if skipped_count else ""
     print(
-        f"SCORE: {score:.3f}  PASS: {all_pass}  ({earned}/{total}){skip_note}",
+        f"SCORE: {score:.3f}  PASS: {all_pass}  ({earned}/{total})",
         file=sys.stderr,
     )
     sys.exit(0 if all_pass else 1)

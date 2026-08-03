@@ -226,7 +226,7 @@ def llm_judge_vision(
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -235,7 +235,7 @@ def llm_judge_vision(
                         {"type": "text", "text": prompt},
                     ],
                 }],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )

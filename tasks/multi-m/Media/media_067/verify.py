@@ -41,7 +41,7 @@ _INPUTS_DIR = os.path.join(
 )
 
 INPUT_FILES: list[str] = [
-    os.path.join(_INPUTS_DIR, "watcharr_poster_002.jpg"),
+    os.path.join(_INPUTS_DIR, "watcharr_poster_066.jpg"),
 ]
 
 # ── Result accumulator ────────────────────────────────────────────────────────
@@ -150,8 +150,8 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         resp = requests.post(
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview", "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 10},
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"), "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -195,7 +195,7 @@ def llm_judge_vision(
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -204,7 +204,7 @@ def llm_judge_vision(
                         {"type": "text", "text": prompt},
                     ],
                 }],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )
@@ -226,20 +226,20 @@ def check_0_input_files_exist() -> None:
 
 
 def check_1_watcharr_batman_content() -> int | None:
-    """The Batman exists in watcharr contents table."""
+    """Nightmare Alley exists in watcharr contents table."""
     try:
         row = watcharr_sql(
-            "SELECT id, title FROM contents WHERE title = 'The Batman' AND type = 'movie' LIMIT 1"
+            "SELECT id, title FROM contents WHERE title = 'Nightmare Alley' AND type = 'movie' LIMIT 1"
         )
         if row:
             content_id = row.split("|")[0]
             check("1. watcharr_batman_content", 1, True, f"content_id={content_id}")
             return int(content_id)
         row = watcharr_sql(
-            "SELECT id, title FROM contents WHERE title LIKE '%Batman%' AND type = 'movie'"
+            "SELECT id, title FROM contents WHERE title LIKE '%Nightmare%' AND type = 'movie'"
         )
         check("1. watcharr_batman_content", 1, False,
-              f"'The Batman' not found; similar: {row[:200]}")
+              f"'Nightmare Alley' not found; similar: {row[:200]}")
         return None
     except Exception as e:
         check("1. watcharr_batman_content", 1, False, f"exception: {e}")
@@ -247,14 +247,16 @@ def check_1_watcharr_batman_content() -> int | None:
 
 
 def check_2_watcharr_watched_status(content_id: int | None) -> None:
-    """The Batman is marked as watched (FINISHED) in watcharr."""
+    """Nightmare Alley is marked as watched (FINISHED) in watcharr."""
     if content_id is None:
         check("2. watcharr_watched_status", 2, False, "skipped: content not found")
         return
     try:
         status = watcharr_sql(
-            f"SELECT status FROM watcheds WHERE content_id = {content_id} "
-            f"AND deleted_at IS NULL LIMIT 1"
+            f"SELECT w.status FROM watcheds w "
+            f"JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
+            f"WHERE w.content_id = {content_id} AND w.deleted_at IS NULL "
+            f"ORDER BY w.updated_at DESC LIMIT 1"
         )
         if status.upper() == "FINISHED":
             check("2. watcharr_watched_status", 2, True)
@@ -266,14 +268,16 @@ def check_2_watcharr_watched_status(content_id: int | None) -> None:
 
 
 def check_3_watcharr_rating(content_id: int | None) -> None:
-    """The Batman has a rating of 8.5 in watcharr."""
+    """Nightmare Alley has a rating of 8.5 in watcharr."""
     if content_id is None:
         check("3. watcharr_rating", 2, False, "skipped: content not found")
         return
     try:
         raw = watcharr_sql(
-            f"SELECT rating FROM watcheds WHERE content_id = {content_id} "
-            f"AND deleted_at IS NULL LIMIT 1"
+            f"SELECT w.rating FROM watcheds w "
+            f"JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
+            f"WHERE w.content_id = {content_id} AND w.deleted_at IS NULL "
+            f"ORDER BY w.updated_at DESC LIMIT 1"
         )
         if not raw:
             check("3. watcharr_rating", 2, False, "no watched entry found")
@@ -288,14 +292,16 @@ def check_3_watcharr_rating(content_id: int | None) -> None:
 
 
 def check_4_watcharr_review_length(content_id: int | None) -> str:
-    """The Batman has a review (thoughts) of 50-100 words."""
+    """Nightmare Alley has a review (thoughts) of 50-100 words."""
     if content_id is None:
         check("4. watcharr_review_length", 2, False, "skipped: content not found")
         return ""
     try:
         thoughts = watcharr_sql(
-            f"SELECT thoughts FROM watcheds WHERE content_id = {content_id} "
-            f"AND deleted_at IS NULL LIMIT 1"
+            f"SELECT w.thoughts FROM watcheds w "
+            f"JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
+            f"WHERE w.content_id = {content_id} AND w.deleted_at IS NULL "
+            f"ORDER BY w.updated_at DESC LIMIT 1"
         )
         if not thoughts:
             check("4. watcharr_review_length", 2, False, "no review text found")
@@ -336,19 +342,34 @@ def check_5_watcharr_review_cinematography(review: str) -> None:
         check("5. watcharr_review_cinematography", 2, False, f"exception: {e}")
 
 
-def check_6_cross_modal_poster_title() -> None:
-    """Cross-modal: poster image matches 'The Batman'."""
+def check_6_cross_modal_poster_title(content_id: int | None) -> None:
+    """Cross-modal: poster image matches the film the agent logged in Watcharr."""
     if not os.path.isfile(INPUT_FILES[0]):
         check("6. cross_modal_poster_title", 2, False,
               "skipped: input file missing")
         return
+    if content_id is None:
+        check("6. cross_modal_poster_title", 2, False,
+              "skipped: content not found")
+        return
     try:
+        title = watcharr_sql(
+            f"SELECT c.title FROM watcheds w JOIN contents c ON w.content_id = c.id "
+            f"JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
+            f"WHERE w.content_id = {content_id} "
+            f"AND w.deleted_at IS NULL ORDER BY w.updated_at DESC LIMIT 1"
+        )
+        if not title:
+            check("6. cross_modal_poster_title", 2, False,
+                  "no watched entry by the logged-in user to compare against poster")
+            return
         passed, answer = llm_judge_vision(
             INPUT_FILES[0],
-            "The Batman",
-            "The movie poster shown is for the film 'The Batman'. The title "
+            title,
+            "The movie poster shown is for the film 'Nightmare Alley'. The title "
             "or visual elements (characters, logo, style) in the poster "
-            "correspond to the 2022 film 'The Batman' directed by Matt Reeves.",
+            "correspond to the 2021 film 'Nightmare Alley' directed by "
+            "Guillermo del Toro.",
         )
         check("6. cross_modal_poster_title", 2, passed,
               f"llm_judge_vision: {answer}")
@@ -357,23 +378,23 @@ def check_6_cross_modal_poster_title() -> None:
 
 
 def check_7_siyuan_ep45_exists(token: str) -> str | None:
-    """SiYuan document 'EP-45: The Noir Superhero' exists."""
+    """SiYuan document 'EP-46: The Noir Carnival' exists."""
     try:
         rows = siyuan_sql(
             token,
             "SELECT id, content FROM blocks WHERE type = 'd' "
-            "AND content LIKE '%EP-45%Noir Superhero%'"
+            "AND content LIKE '%EP-46%Noir Carnival%'"
         )
         if not rows:
             rows = siyuan_sql(
                 token,
                 "SELECT id, content FROM blocks WHERE type = 'd' "
-                "AND content LIKE '%EP-45%'"
+                "AND content LIKE '%EP-46%'"
             )
         if rows:
             exact = [r for r in rows
-                     if "EP-45" in r.get("content", "")
-                     and "Noir Superhero" in r.get("content", "")]
+                     if "EP-46" in r.get("content", "")
+                     and "Noir Carnival" in r.get("content", "")]
             if exact:
                 check("7. siyuan_ep45_exists", 2, True,
                       f"title='{exact[0]['content']}'")
@@ -382,7 +403,7 @@ def check_7_siyuan_ep45_exists(token: str) -> str | None:
                   f"title='{rows[0]['content']}' (partial match)")
             return rows[0]["id"]
         check("7. siyuan_ep45_exists", 2, False,
-              "no document matching 'EP-45: The Noir Superhero' found")
+              "no document matching 'EP-46: The Noir Carnival' found")
         return None
     except Exception as e:
         check("7. siyuan_ep45_exists", 2, False, f"exception: {e}")
@@ -390,9 +411,9 @@ def check_7_siyuan_ep45_exists(token: str) -> str | None:
 
 
 def check_8_siyuan_intro_length(token: str, doc_id: str | None) -> None:
-    """EP-45 document has an introduction of >= 100 characters."""
+    """EP-46 document has an introduction of >= 100 characters."""
     if doc_id is None:
-        check("8. siyuan_intro_length", 2, False, "skipped: EP-45 doc not found")
+        check("8. siyuan_intro_length", 2, False, "skipped: EP-46 doc not found")
         return
     try:
         md_content = siyuan_export_md(token, doc_id)
@@ -416,25 +437,25 @@ def check_8_siyuan_intro_length(token: str, doc_id: str | None) -> None:
 
 
 def check_9_siyuan_director_doc(token: str) -> str | None:
-    """SiYuan document 'Director - Matt Reeves' exists."""
+    """SiYuan document 'Director - Guillermo del Toro' exists."""
     try:
         rows = siyuan_sql(
             token,
             "SELECT id, content FROM blocks WHERE type = 'd' "
-            "AND content LIKE '%Director%Matt Reeves%'"
+            "AND content LIKE '%Director%del Toro%'"
         )
         if not rows:
             rows = siyuan_sql(
                 token,
                 "SELECT id, content FROM blocks WHERE type = 'd' "
-                "AND content LIKE '%Director%Reeves%'"
+                "AND content LIKE '%Director%Toro%'"
             )
         if rows:
             check("9. siyuan_director_doc", 1, True,
                   f"title='{rows[0]['content']}'")
             return rows[0]["id"]
         check("9. siyuan_director_doc", 1, False,
-              "no document matching 'Director - Matt Reeves' found")
+              "no document matching 'Director - Guillermo del Toro' found")
         return None
     except Exception as e:
         check("9. siyuan_director_doc", 1, False, f"exception: {e}")
@@ -442,16 +463,16 @@ def check_9_siyuan_director_doc(token: str) -> str | None:
 
 
 def check_10_siyuan_bidir_link(token: str, ep45_id: str | None, director_id: str | None) -> None:
-    """EP-45 contains a bidirectional link to the Director - Matt Reeves document."""
+    """EP-46 contains a bidirectional link to the Director - Guillermo del Toro document."""
     if ep45_id is None:
         check("10. siyuan_bidir_link", 3, False,
-              "skipped: EP-45 doc not found")
+              "skipped: EP-46 doc not found")
         return
     try:
         md_content = siyuan_export_md(token, ep45_id)
 
         has_link = bool(re.search(
-            r'\(\(.*\)\)|Director.*Matt\s*Reeves|Matt\s*Reeves',
+            r'\(\(.*\)\)|Director.*del\s*Toro|del\s*Toro',
             md_content, re.IGNORECASE
         ))
 
@@ -460,8 +481,8 @@ def check_10_siyuan_bidir_link(token: str, ep45_id: str | None, director_id: str
                 token,
                 f"SELECT id, content FROM blocks WHERE root_id = '{ep45_id}' "
                 f"AND (markdown LIKE '%{director_id}%' "
-                f"OR markdown LIKE '%Director%Matt Reeves%' "
-                f"OR markdown LIKE '%Director - Matt Reeves%')"
+                f"OR markdown LIKE '%Director%del Toro%' "
+                f"OR markdown LIKE '%Director - Guillermo del Toro%')"
             )
             if ref_rows:
                 check("10. siyuan_bidir_link", 3, True,
@@ -478,7 +499,7 @@ def check_10_siyuan_bidir_link(token: str, ep45_id: str | None, director_id: str
                     check("10. siyuan_bidir_link", 3, True,
                           "ref table link to director doc found")
                     return
-            if any("Director" in r.get("content", "") or "Matt Reeves" in r.get("content", "")
+            if any("Director" in r.get("content", "") or "del Toro" in r.get("content", "")
                    for r in ref_rows):
                 check("10. siyuan_bidir_link", 3, True,
                       "ref to director-related block found")
@@ -486,11 +507,11 @@ def check_10_siyuan_bidir_link(token: str, ep45_id: str | None, director_id: str
 
         if has_link:
             check("10. siyuan_bidir_link", 3, True,
-                  "markdown contains reference to Director - Matt Reeves")
+                  "markdown contains reference to Director - Guillermo del Toro")
             return
 
         check("10. siyuan_bidir_link", 3, False,
-              "no bidirectional link to Director - Matt Reeves found in EP-45")
+              "no bidirectional link to Director - Guillermo del Toro found in EP-46")
     except Exception as e:
         check("10. siyuan_bidir_link", 3, False, f"exception: {e}")
 
@@ -505,7 +526,7 @@ def main() -> None:
     check_3_watcharr_rating(content_id)
     review = check_4_watcharr_review_length(content_id)
     check_5_watcharr_review_cinematography(review)
-    check_6_cross_modal_poster_title()
+    check_6_cross_modal_poster_title(content_id)
 
     # SiYuan checks
     token = get_siyuan_token()

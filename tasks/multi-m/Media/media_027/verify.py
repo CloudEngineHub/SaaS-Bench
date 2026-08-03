@@ -189,7 +189,7 @@ def llm_judge_vision(
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -198,7 +198,7 @@ def llm_judge_vision(
                         {"type": "text", "text": prompt},
                     ],
                 }],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )
@@ -237,7 +237,9 @@ def check_2_scream_status_planned() -> None:
         rows = watcharr_sql(
             "SELECT w.status FROM watcheds w "
             "JOIN contents c ON w.content_id = c.id "
-            "WHERE LOWER(c.title) LIKE '%scream%' AND w.deleted_at IS NULL;"
+            "JOIN users u ON w.user_id = u.id "
+            "WHERE LOWER(c.title) LIKE '%scream%' AND u.username = 'admin' "
+            "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC;"
         )
         if not rows:
             check("2. scream_status_planned", 2, False, "no watched entry for Scream")
@@ -255,7 +257,9 @@ def check_3_scream_no_rating() -> None:
         rows = watcharr_sql(
             "SELECT w.rating, w.thoughts FROM watcheds w "
             "JOIN contents c ON w.content_id = c.id "
-            "WHERE LOWER(c.title) LIKE '%scream%' AND w.deleted_at IS NULL;"
+            "JOIN users u ON w.user_id = u.id "
+            "WHERE LOWER(c.title) LIKE '%scream%' AND u.username = 'admin' "
+            "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC;"
         )
         if not rows:
             check("3. scream_no_rating", 2, False, "no watched entry for Scream")
@@ -285,7 +289,9 @@ def check_4_cross_modal_poster_title() -> None:
         title_row = watcharr_sql(
             "SELECT c.title FROM watcheds w "
             "JOIN contents c ON w.content_id = c.id "
-            "WHERE LOWER(c.title) LIKE '%scream%' AND w.deleted_at IS NULL;"
+            "JOIN users u ON w.user_id = u.id "
+            "WHERE LOWER(c.title) LIKE '%scream%' AND u.username = 'admin' "
+            "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC;"
         )
         if not title_row:
             check("4. cross_modal_poster_title", 2, False, "no Scream entry in watcharr to validate")

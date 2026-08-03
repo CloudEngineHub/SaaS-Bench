@@ -122,6 +122,40 @@ def siyuan_sql(stmt: str) -> list:
     return []
 
 
+def siyuan_export_md(doc_id: str) -> str:
+    """Export a document's markdown in TRUE document order.
+
+    NOTE: the blocks table's `sort` column is grouped by block type (headings,
+    paragraphs, lists), NOT document order — section extraction from
+    `ORDER BY sort` yields headings first and prose last, i.e. empty sections.
+    exportMdContent returns the document in real reading order.
+    """
+    result = siyuan_api("/api/export/exportMdContent", {"id": doc_id})
+    if result.get("code") != 0:
+        return ""
+    data = result.get("data")
+    if isinstance(data, dict):
+        return data.get("content", "") or ""
+    return ""
+
+
+def md_sections(md: str) -> list[tuple[int, str, list[str]]]:
+    """Split markdown into (heading_level, heading_text, body_lines) sections."""
+    sections: list[tuple[int, str, list[str]]] = []
+    current: list | None = None
+    for line in md.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if m:
+            if current is not None:
+                sections.append((current[0], current[1], current[2]))
+            current = [len(m.group(1)), m.group(2).strip(), []]
+        elif current is not None:
+            current[2].append(line)
+    if current is not None:
+        sections.append((current[0], current[1], current[2]))
+    return sections
+
+
 def count_sentences(text: str) -> int:
     text = text.strip()
     if not text:
@@ -145,9 +179,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )
@@ -190,7 +224,7 @@ def llm_judge_vision(
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -199,7 +233,7 @@ def llm_judge_vision(
                         {"type": "text", "text": prompt},
                     ],
                 }],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )
@@ -281,21 +315,27 @@ def _get_doc_blocks() -> list[dict]:
     return _doc_blocks_cache
 
 
+_doc_md_cache: str | None = None
+
+
+def _get_doc_md() -> str:
+    """Export the summary doc as markdown in true reading order (cached)."""
+    global _doc_md_cache
+    if _doc_md_cache is not None:
+        return _doc_md_cache
+    doc_id = _find_doc()
+    _doc_md_cache = siyuan_export_md(doc_id) if doc_id else ""
+    return _doc_md_cache
+
+
 def _get_section_text(heading_name: str) -> str:
-    blocks = _get_doc_blocks()
-    in_section = False
-    parts = []
-    for b in blocks:
-        if b.get("type") == "h":
-            if heading_name.lower() in b.get("content", "").lower():
-                in_section = True
-                continue
-            elif in_section:
-                break
-        if in_section and b.get("type") in ("p", "l", "i", "b"):
-            text = b.get("markdown") or b.get("content") or ""
-            parts.append(text.strip())
-    return "\n".join(parts)
+    md = _get_doc_md()
+    if not md.strip():
+        return ""
+    for _lvl, title, lines in md_sections(md):
+        if heading_name.lower() in title.lower():
+            return "\n".join(l.strip() for l in lines if l.strip())
+    return ""
 
 
 def _get_full_doc_text() -> str:

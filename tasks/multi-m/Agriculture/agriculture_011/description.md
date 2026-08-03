@@ -10,7 +10,7 @@ Examine `tasks/multi-m/inputs/farmos_crop_043.jpg` first (full-field overview): 
 | **High** | Dense insect mass at tassel/leaf sheath, shed skins visible | Apply Pyrethrin (OMRI-listed) |
 
 Step 2 — Locate corn plant asset in FarmOS:
-Find the existing corn / maize plant asset. It may appear under a Chinese name (e.g. '玉米-大棚1号') or an English name (e.g. 'Corn Greenhouse 1'). Confirm both names refer to the same single asset before proceeding — do not create a duplicate.
+Find the existing corn plant asset named `2023 Sweet Corn Planting 1` (an English name under Assets → Plants). Use this existing asset for all corn-related logs below — do not create a new asset.
 
 Step 3 — Create four logs (all field content must be in English):
 
@@ -19,12 +19,12 @@ Step 3 — Create four logs (all field content must be in English):
 - Asset: corn plant asset
 - Attach `tasks/multi-m/inputs/farmos_crop_044.jpg` as the photo evidence
 - In the notes field, record: (1) what tasks/multi-m/inputs/farmos_crop_043.jpg shows about overall canopy condition (note that it cannot confirm or rule out aphid density at distance), (2) what tasks/multi-m/inputs/farmos_crop_044.jpg shows about dense aphid clustering at the tassel/leaf sheath base (shed skins visible), (3) final severity determination: "High"
-- Set a `severity` annotation to "High"
+- The log must clearly state the severity "High" (e.g. in its name or in the notes field — farmOS has no separate severity field)
 
 **Log B — Input Log (today):**
 - Log type: Input
 - Asset: corn plant asset (same as Log A)
-- Notes must include: pesticide name "Pyrethrin (OMRI-listed)", application rate "200 mL/acre", organic certification number "OMRI-2023-PY-001", operator "Li Shifu", equipment "Power Sprayer No. 1"
+- Notes must include: pesticide name "Pyrethrin (OMRI-listed)", application rate "200 mL/acre", organic certification number "OMRI-2023-PY-001", operator "Li Shifu", equipment "Tractor-Mounted Boom Sprayer"
 
 **Log C — Follow-up Observation Log (today + 7 days):**
 - Log type: Observation
@@ -34,16 +34,16 @@ Step 3 — Create four logs (all field content must be in English):
 
 **Log D — Maintenance Log (today):**
 - Log type: Maintenance
-- Asset: **equipment asset** "Power Sprayer No. 1" (NOT the corn plant asset)
+- Asset: **equipment asset** "Tractor-Mounted Boom Sprayer" (NOT the corn plant asset)
 - Notes: post-spray equipment cleaning with water rinse to prevent organic pesticide cross-contamination
 
 **Steps:**
 1. Examine tasks/multi-m/inputs/farmos_crop_043.jpg (full-field) and tasks/multi-m/inputs/farmos_crop_044.jpg (close-up) in sequence; document your observations.
-2. Locate the existing corn plant asset in FarmOS (try both Chinese and English name variants).
+2. Locate the existing corn plant asset `2023 Sweet Corn Planting 1` in FarmOS (do not create a new asset).
 3. Create Emergency Observation Log (today) on corn plant asset: attach tasks/multi-m/inputs/farmos_crop_044.jpg, record dual-image observations, state severity "High".
-4. Create Input Log (today) on corn plant asset: include Pyrethrin, 200 mL/acre, cert# OMRI-2023-PY-001, operator Li Shifu, equipment Power Sprayer No. 1.
+4. Create Input Log (today) on corn plant asset: include Pyrethrin, 200 mL/acre, cert# OMRI-2023-PY-001, operator Li Shifu, equipment Tractor-Mounted Boom Sprayer.
 5. Create Follow-up Observation Log (today + 7 days) on corn plant asset: ~70% reduction, continued monitoring recommendation.
-6. Create Maintenance Log (today) on the **equipment** asset "Power Sprayer No. 1": post-spray water rinse.
+6. Create Maintenance Log (today) on the **equipment** asset "Tractor-Mounted Boom Sprayer": post-spray water rinse.
 
 **Input files:**
 - **File 1:** `tasks/multi-m/inputs/farmos_crop_043.jpg`

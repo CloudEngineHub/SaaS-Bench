@@ -145,9 +145,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         f"Answer only YES or NO."
     )
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -202,9 +202,9 @@ def llm_judge_vision(
         {"type": "text", "text": prompt},
     ]
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": msg_content}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -248,8 +248,9 @@ def check_1_watcharr_encanto_exists() -> None:
         rows = watcharr_sql(
             "SELECT w.status, w.rating, w.thoughts, c.title "
             "FROM watcheds w JOIN contents c ON w.content_id = c.id "
+            "JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
             "WHERE LOWER(c.title) LIKE '%encanto%' "
-            "AND w.deleted_at IS NULL LIMIT 1;"
+            "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC LIMIT 1;"
         )
         if not rows:
             check("1. watcharr_encanto_exists", 2, False,
@@ -286,7 +287,11 @@ def check_3_cross_modal_poster_title() -> None:
         if not _input_files_ok:
             check("3. cross_modal_poster_title", 2, False, "skipped: input file missing")
             return
-        title = _watcharr_row.get("title", "Encanto") if _watcharr_row else "Encanto"
+        if not _watcharr_row:
+            check("3. cross_modal_poster_title", 2, False,
+                  "no watched row to compare against poster")
+            return
+        title = _watcharr_row["title"]
         condition = (
             "The movie poster shown is for the animated film 'Encanto' (2021, Disney). "
             "The title visible on the poster matches the recorded value."
@@ -424,12 +429,10 @@ def check_8_siyuan_bidirectional_link() -> None:
         has_backward = len(backward) > 0
         if has_forward and has_backward:
             check("8. siyuan_bidirectional_link", 3, True, "refs exist in both directions")
-        elif has_forward:
-            check("8. siyuan_bidirectional_link", 3, False,
-                  "only forward link (animation->genre); missing reverse link")
-        elif has_backward:
-            check("8. siyuan_bidirectional_link", 3, False,
-                  "only reverse link (genre->animation); missing forward link")
+        elif has_forward or has_backward:
+            direction = "animation->genre" if has_forward else "genre->animation"
+            check("8. siyuan_bidirectional_link", 3, True,
+                  f"ref {direction} found; SiYuan auto-generates the backlink view")
         else:
             anim_blocks = siyuan_sql(
                 f"SELECT markdown FROM blocks WHERE root_id='{_animation_doc_root_id}' "

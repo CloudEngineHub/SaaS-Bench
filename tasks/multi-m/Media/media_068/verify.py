@@ -2,7 +2,7 @@
 Verifier for media_068: Log multiverse film from poster in Watcharr + create EP-45 script in SiYuan.
 
 Checks: 12 weighted checks across watcharr, siyuan.
-Strategy: docker exec (watcharr SQLite) + REST API (siyuan)
+Strategy: host-side SQLite via docker cp (watcharr) + REST API (siyuan)
 
 Required env vars:
   SERVER_HOSTNAME, WATCHARR_PORT, WATCHARR_CONTAINER, SIYUAN_PORT, SIYUAN_CONTAINER
@@ -14,6 +14,9 @@ import subprocess
 import json
 import re
 import base64
+import shutil
+import sqlite3
+import tempfile
 
 try:
     import requests
@@ -82,10 +85,40 @@ def docker_exec(container: str, *args: str, timeout: int = 15) -> tuple[int, str
 
 
 def watcharr_sql(query: str) -> str:
-    rc, stdout, stderr = docker_exec(
-        WATCHARR_CONTAINER, "sqlite3", "-json", WATCHARR_DB, query
-    )
-    return stdout.strip()
+    """Run a query against the Watcharr SQLite DB from the host.
+
+    The mw-watcharr image ships no sqlite3 CLI and has no network access to
+    install one, so we `docker cp` the database (plus WAL/SHM sidecars) to a
+    host temp dir and query it with Python's sqlite3 module. Returns a string
+    in the same format as `sqlite3 -json`: a JSON array of objects keyed by
+    column name ("[]" for an empty result).
+    """
+    tmpdir = tempfile.mkdtemp(prefix="watcharr_db_")
+    try:
+        local_db = os.path.join(tmpdir, "watcharr.db")
+        for suffix in ("", "-wal", "-shm"):
+            r = subprocess.run(
+                ["docker", "cp", f"{WATCHARR_CONTAINER}:{WATCHARR_DB}{suffix}",
+                 f"{local_db}{suffix}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if suffix == "" and r.returncode != 0:
+                raise RuntimeError(
+                    f"docker cp {WATCHARR_CONTAINER}:{WATCHARR_DB} failed: "
+                    f"{(r.stderr or r.stdout).strip()}"
+                )
+        conn = sqlite3.connect(local_db)
+        try:
+            cur = conn.execute(query)
+            cols = [d[0] for d in cur.description] if cur.description else []
+            rows = cur.fetchall()
+        except sqlite3.Error as e:
+            raise RuntimeError(f"sqlite3 query failed: {e}") from e
+        finally:
+            conn.close()
+        return json.dumps([dict(zip(cols, row)) for row in rows])
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def siyuan_login() -> str:
@@ -159,9 +192,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )
@@ -207,7 +240,7 @@ def llm_judge_vision(
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -215,7 +248,7 @@ def llm_judge_vision(
                         {"type": "text", "text": prompt},
                     ],
                 }],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )
@@ -261,7 +294,9 @@ def _get_watched_row() -> dict | None:
     rows_json = watcharr_sql(
         "SELECT w.id, w.status, w.rating, w.thoughts, c.title "
         "FROM watcheds w JOIN contents c ON w.content_id = c.id "
-        "WHERE c.title LIKE '%Spider-Man%No Way Home%' OR c.title LIKE '%Spider%Man%Way%Home%';"
+        "JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
+        "WHERE (c.title LIKE '%Spider-Man%No Way Home%' OR c.title LIKE '%Spider%Man%Way%Home%') "
+        "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC;"
     )
     rows = json.loads(rows_json) if rows_json else []
     return rows[0] if rows else None

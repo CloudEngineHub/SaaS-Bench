@@ -2,7 +2,7 @@
 Verifier for media_065: Vigilante film (from poster) + Atrocious Judges book → SiYuan comparison script
 
 Checks: 14 weighted checks (24 total points) across watcharr, booklore, siyuan.
-Strategy: docker exec SQLite (watcharr), docker exec MariaDB (booklore), REST API (siyuan),
+Strategy: host-side SQLite via docker cp (watcharr), docker exec MariaDB (booklore), REST API (siyuan),
           llm_judge + llm_judge_vision for content quality and cross-modal consistency.
 
 Required env vars:
@@ -45,7 +45,7 @@ if _missing:
     print(f"FATAL: {', '.join(_missing)} not set", file=sys.stderr)
     sys.exit(1)
 
-BOOKLORE_DB_CONTAINER = os.getenv("BOOKLORE_DB_CONTAINER", BOOKLORE_CONTAINER + "-db")
+BOOKLORE_DB_CONTAINER = os.getenv("BOOKLORE_DB_CONTAINER") or BOOKLORE_CONTAINER
 
 _INPUTS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "inputs"
@@ -103,23 +103,39 @@ def _find_watcharr_db() -> str:
 
 
 def watcharr_sql(sql: str, timeout: int = 15) -> tuple[int, str, str]:
+    """Query Watcharr's SQLite DB.
+
+    The mw-watcharr image ships no sqlite3 CLI and the container has no
+    outbound network to install one, so docker cp the DB (plus WAL sidecars)
+    to a host temp dir and query it with Python's sqlite3 module. Output
+    mimics `sqlite3 -separator "\t"`.
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+
     db = _find_watcharr_db()
-    rc, out, err = docker_exec(
-        WATCHARR_CONTAINER, "sqlite3", "-separator", "\t", db, sql,
-        timeout=timeout,
-    )
-    if rc != 0 and ("not found" in err.lower() or "executable file" in err.lower()):
-        docker_exec(
-            WATCHARR_CONTAINER, "sh", "-c",
-            "apk add --no-cache sqlite 2>/dev/null || "
-            "(apt-get update -qq && apt-get install -y -qq sqlite3) 2>/dev/null",
-            timeout=60,
-        )
-        rc, out, err = docker_exec(
-            WATCHARR_CONTAINER, "sqlite3", "-separator", "\t", db, sql,
-            timeout=timeout,
-        )
-    return rc, out, err
+    tmpdir = tempfile.mkdtemp(prefix="watcharr_verify_")
+    try:
+        local_db = os.path.join(tmpdir, os.path.basename(db))
+        r = subprocess.run(["docker", "cp", f"{WATCHARR_CONTAINER}:{db}", local_db],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            return r.returncode, "", r.stderr
+        for suffix in ("-wal", "-shm"):
+            subprocess.run(["docker", "cp", f"{WATCHARR_CONTAINER}:{db}{suffix}", tmpdir],
+                           capture_output=True, text=True, timeout=timeout)
+        con = sqlite3.connect(local_db)
+        try:
+            rows = con.execute(sql).fetchall()
+        finally:
+            con.close()
+        out = "\n".join("\t".join("" if v is None else str(v) for v in row) for row in rows)
+        return 0, (out + "\n") if out else "", ""
+    except Exception as e:
+        return 1, "", str(e)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # -- Booklore helpers (MariaDB via docker exec) --------------------------------
@@ -197,6 +213,20 @@ def siyuan_sql(stmt: str) -> list:
     return []
 
 
+def siyuan_export_md(doc_id: str) -> str:
+    """Export a document's markdown in TRUE document order.
+
+    NOTE: the blocks table's `sort` column is grouped by block type (headings,
+    paragraphs, lists), NOT document order — position-sensitive extraction from
+    `ORDER BY sort` yields headings first and prose last, i.e. wrong positions.
+    exportMdContent returns the document in real reading order.
+    """
+    data = siyuan_api("/api/export/exportMdContent", {"id": doc_id})
+    if isinstance(data, dict):
+        return data.get("content", "") or ""
+    return ""
+
+
 # -- LLM judge helpers ---------------------------------------------------------
 def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, str]:
     api_base = os.getenv("MINDRA_BASE_URL", "https://api.mindracode.com/v1")
@@ -212,9 +242,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview",
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                   "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 10},
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -263,9 +293,9 @@ def llm_judge_vision(
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview",
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                   "messages": [{"role": "user", "content": msg_content}],
-                  "max_tokens": 10},
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -302,9 +332,11 @@ def check_1_watcharr_film_exists() -> None:
             "SELECT c.id, c.title, w.status, w.rating, w.thoughts "
             "FROM contents c "
             "JOIN watcheds w ON w.content_id = c.id "
+            "JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
             "WHERE c.type = 'movie' "
+            "AND LOWER(c.title) LIKE '%the batman%' "
             "AND w.deleted_at IS NULL "
-            "ORDER BY w.id DESC LIMIT 20;"
+            "ORDER BY w.updated_at DESC LIMIT 20;"
         )
         if rc != 0:
             check("1. watcharr_film_exists", 2, False, f"sqlite error: {err.strip()[:200]}")
@@ -585,16 +617,15 @@ def check_12_siyuan_ep47_structure() -> None:
                 has_intro = True
                 break
         if not has_intro:
-            intro_text = ""
-            first_heading_seen = False
-            for b in _ep47_blocks:
-                if b.get("type") == "h":
-                    if first_heading_seen:
-                        break
-                    first_heading_seen = True
-                    continue
-                if not first_heading_seen:
-                    intro_text += b.get("content", "") + " "
+            # Intro = text before the first heading. Blocks `ORDER BY sort` is
+            # grouped by block type, not document order, so use the exported
+            # markdown (true reading order) for this position-sensitive check.
+            intro_lines: list[str] = []
+            for line in siyuan_export_md(_ep47_doc_id).splitlines():
+                if re.match(r"^#{1,6}\s+", line):
+                    break
+                intro_lines.append(line)
+            intro_text = " ".join(intro_lines)
             if len(intro_text.strip()) > 80:
                 has_intro = True
 

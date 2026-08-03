@@ -1,10 +1,11 @@
 """
-Verifier for agriculture_022: Organic audit — cross-reference Grocy product
-stock_id values (from the `stock` table, excluding `x%` placeholders) against
-FarmOS harvest log `lot_number` attributes; flag discrepant products.
+Verifier for agriculture_022: Organic audit — reconcile the warehouse's
+delivery manifest (Grocy product -> batch number) against FarmOS harvest log
+names; flag discrepant products with both a description note and a
+'[REVIEW REQUIRED]' name suffix.
 
-Checks: 8 weighted checks across grocy, farmos.
-Strategy: grocy via docker exec sqlite3; farmos via JSON:API.
+Checks: 7 weighted checks (13 total points) across grocy, farmos.
+Strategy: grocy=docker exec PHP PDO (SQLite); farmos=docker exec PHP PDO (SQLite)
 
 Required env vars:
   SERVER_HOSTNAME, GROCY_PORT, GROCY_CONTAINER, FARMOS_PORT, FARMOS_CONTAINER.
@@ -14,8 +15,6 @@ import json
 import os
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 
 # ── Config (from env) ─────────────────────────────────────────────────────────
 HOST = os.getenv("SERVER_HOSTNAME", "localhost")
@@ -35,9 +34,32 @@ for _var_name, _var_val in [
         print(f"FATAL: {_var_name} not set", file=sys.stderr)
         sys.exit(1)
 
-FARMOS_BASE = f"http://{HOST}:{FARMOS_PORT}"
+FARMOS_SQLITE = "/opt/drupal/web/sites/default/files/.ht.sqlite"
 
-GROCY_DB_CANDIDATES = ["/config/data/grocy.db", "/config/data/data/grocy.db", "/var/www/data/grocy.db"]
+GROCY_DB_CANDIDATES = [
+    "/config/data/grocy.db",
+    "/config/data/data/grocy.db",
+    "/var/www/data/grocy.db",
+]
+
+DISCREPANCY_NOTE = "DISCREPANCY: No matching FarmOS harvest log found"
+REVIEW_SUFFIX = "[REVIEW REQUIRED]"
+
+# Delivery manifest from the task description: exact Grocy product name ->
+# batch number. Matched entries reference FarmOS harvest logs that exist
+# verbatim; unmatched entries reference harvest logs that do NOT exist.
+MANIFEST_MATCHED = {
+    "365 Everyday Value, Fat Free Skim Milk": "Cow Milk — Weekly Collection August Week 1",
+    "Clover Honey": "2024 Honey Harvest — Hive A and B",
+    "Pure Raw Honey": "2024 Honey Harvest — Hive A and B",
+    "Black Forest Girl, Homemade Spaetzles, Egg Noodles": "2024 Egg Collection — Weekly Tally August Week 3",
+}
+MANIFEST_UNMATCHED = {
+    "Nonfat Greek Yogurt": "2024 Goat Milk Collection — Weekly Tally September Week 1",
+    "Cottage Cheese": "2024 Sheep Milk Collection — Weekly Tally August Week 3",
+    "Kfactor 22 Manuka Honey": "2024 Manuka Honey Harvest — Hive C",
+    "Monterey Jack Cheese": "2024 Cow Milk — Weekly Collection September Week 2",
+}
 
 # ── Result accumulator ────────────────────────────────────────────────────────
 _checks: list[tuple[str, int, bool, str]] = []
@@ -59,19 +81,6 @@ def docker_exec(container: str, *args: str, timeout: int = 15) -> tuple[int, str
     return r.returncode, r.stdout, r.stderr
 
 
-def farmos_api_get(path: str, timeout: int = 15) -> dict:
-    url = f"{FARMOS_BASE}{path}"
-    req = urllib.request.Request(url)
-    req.add_header("Accept", "application/vnd.api+json")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"FarmOS API {e.code}: {e.read().decode()[:200]}")
-    except Exception as e:
-        raise RuntimeError(f"FarmOS API error: {e}")
-
-
 _grocy_db_path = ""
 
 
@@ -88,250 +97,289 @@ def _find_grocy_db() -> str:
     return _grocy_db_path
 
 
-def grocy_sql(query: str) -> str:
+def grocy_sql_json(query: str) -> list[dict]:
     db = _find_grocy_db()
-    rc, stdout, stderr = docker_exec(
-        GROCY_CONTAINER,
-        "sqlite3", "-separator", "|", db, query,
-        timeout=15,
-    )
-    if rc == 0:
-        return stdout.strip()
     php_script = (
-        f'$db = new PDO("sqlite:{db}");'
-        f'$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);'
-        f'$r = $db->query("{query.replace(chr(34), chr(92)+chr(34))}");'
-        f'while($row=$r->fetch(PDO::FETCH_NUM))'
-        f'{{ echo implode("|",$row)."\\n"; }}'
+        '$db = new PDO("sqlite:' + db + '");'
+        '$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);'
+        '$r = $db->query(' + json.dumps(query) + ');'
+        '$rows = $r->fetchAll(PDO::FETCH_ASSOC);'
+        'echo json_encode($rows);'
     )
-    rc2, stdout2, stderr2 = docker_exec(
+    rc, stdout, stderr = docker_exec(
         GROCY_CONTAINER, "php", "-r", php_script, timeout=15,
     )
-    if rc2 != 0:
-        raise RuntimeError(f"grocy query failed: sqlite3({stderr.strip()}) php({stderr2.strip()})")
-    return stdout2.strip()
+    if rc != 0:
+        raise RuntimeError(f"grocy php error (rc={rc}): {stderr.strip()}")
+    if not stdout.strip():
+        return []
+    return json.loads(stdout.strip())
 
 
-# ── Data retrieval ────────────────────────────────────────────────────────────
-def get_grocy_products_with_stock_ids() -> dict[int, dict]:
-    """Return {product_id: {name, description, stock_ids: set}} for products with non-placeholder stock entries."""
-    raw = grocy_sql(
-        "SELECT p.id, p.name, COALESCE(p.description,''), s.stock_id "
-        "FROM products p "
-        "JOIN stock s ON s.product_id = p.id "
-        "WHERE s.stock_id IS NOT NULL AND s.stock_id != '' "
-        "AND s.stock_id NOT LIKE 'x%';"
+def farmos_sql_json(query: str) -> list[dict]:
+    php_script = (
+        '$db = new PDO("sqlite:' + FARMOS_SQLITE + '");'
+        '$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);'
+        '$r = $db->query(' + json.dumps(query) + ');'
+        '$rows = $r->fetchAll(PDO::FETCH_ASSOC);'
+        'echo json_encode($rows);'
     )
-    products: dict[int, dict] = {}
-    if not raw:
-        return products
-    for line in raw.split("\n"):
-        parts = line.split("|", 3)
-        if len(parts) >= 4:
-            pid = int(parts[0].strip())
-            stock_id = parts[3].strip()
-            if pid not in products:
-                products[pid] = {
-                    "name": parts[1].strip(),
-                    "description": parts[2].strip(),
-                    "stock_ids": set(),
-                }
-            products[pid]["stock_ids"].add(stock_id)
-    return products
+    rc, stdout, stderr = docker_exec(
+        FARMOS_CONTAINER, "php", "-r", php_script, timeout=15,
+    )
+    if rc != 0:
+        raise RuntimeError(f"farmos php error (rc={rc}): {stderr.strip()}")
+    if not stdout.strip():
+        return []
+    return json.loads(stdout.strip())
 
 
-def get_farmos_harvest_lot_numbers() -> set[str]:
-    """Return set of lot_number values from FarmOS harvest logs via JSON:API."""
-    lot_numbers: set[str] = set()
-    path = "/api/log/harvest?page[limit]=50"
-    while path:
-        data = farmos_api_get(path)
-        for item in data.get("data", []):
-            lot = item.get("attributes", {}).get("lot_number")
-            if lot and lot.strip():
-                lot_numbers.add(lot.strip())
-        next_link = data.get("links", {}).get("next")
-        if next_link:
-            href = next_link if isinstance(next_link, str) else next_link.get("href", "")
-            if href and href.startswith(FARMOS_BASE):
-                path = href[len(FARMOS_BASE):]
-            elif href:
-                path = href
-            else:
-                path = ""
-        else:
-            path = ""
-    return lot_numbers
+# ── Cached state ──────────────────────────────────────────────────────────────
+_products_by_name: dict[str, dict] | None = None
+_farmos_harvest_names: set[str] | None = None
 
 
-# ── Shared state (loaded once) ───────────────────────────────────────────────
-grocy_products: dict[int, dict] = {}
-farmos_lots: set[str] = set()
-matched_pids: set[int] = set()
-unmatched_pids: set[int] = set()
+def _load_manifest_products() -> dict[str, dict]:
+    """Grocy products referenced by the manifest, keyed by base manifest name.
+
+    Products whose name was appended with the review suffix no longer match
+    by exact name; resolve them back to their base manifest name.
+    """
+    global _products_by_name
+    if _products_by_name is not None:
+        return _products_by_name
+    names = list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+    quoted = ", ".join("'" + n.replace("'", "''") + "'" for n in names)
+    rows = grocy_sql_json(
+        "SELECT id, name, COALESCE(description, '') AS description "
+        f"FROM products WHERE name IN ({quoted})"
+    )
+    products = {r["name"]: r for r in rows}
+    for base in names:
+        if base in products:
+            continue
+        rows2 = grocy_sql_json(
+            "SELECT id, name, COALESCE(description, '') AS description "
+            "FROM products WHERE name LIKE "
+            "'" + base.replace("'", "''") + "%" + REVIEW_SUFFIX + "%'"
+        )
+        if rows2:
+            products[base] = rows2[0]
+    _products_by_name = products
+    return _products_by_name
 
 
-def load_data() -> None:
-    global grocy_products, farmos_lots, matched_pids, unmatched_pids
-    grocy_products = get_grocy_products_with_stock_ids()
-    farmos_lots = get_farmos_harvest_lot_numbers()
+def _load_farmos_harvest_names() -> set[str]:
+    global _farmos_harvest_names
+    if _farmos_harvest_names is not None:
+        return _farmos_harvest_names
+    rows = farmos_sql_json(
+        "SELECT name FROM log_field_data WHERE type = 'harvest'"
+    )
+    _farmos_harvest_names = {r["name"].strip() for r in rows if r.get("name")}
+    return _farmos_harvest_names
 
-    for pid, info in grocy_products.items():
-        if info["stock_ids"] & farmos_lots:
-            matched_pids.add(pid)
-        else:
-            unmatched_pids.add(pid)
+
+def _flagged_desc_names() -> set[str]:
+    rows = grocy_sql_json(
+        "SELECT name FROM products WHERE description LIKE "
+        "'%" + DISCREPANCY_NOTE + "%'"
+    )
+    return {r["name"] for r in rows}
+
+
+def _flagged_name_rows() -> list[dict]:
+    return grocy_sql_json(
+        "SELECT id, name FROM products WHERE name LIKE "
+        "'%" + REVIEW_SUFFIX + "%'"
+    )
 
 
 # ── Individual checks ─────────────────────────────────────────────────────────
-def check_1_grocy_has_products_with_batches() -> None:
+def check_1_manifest_products_exist() -> None:
+    """All 8 manifest products exist in Grocy (exact name)."""
     try:
-        check("1. grocy_products_with_batches_exist", 1,
-              len(grocy_products) > 0,
-              f"found {len(grocy_products)} products with batch numbers"
-              if grocy_products else "no products with batch numbers found in Grocy stock table")
+        products = _load_manifest_products()
+        missing = [n for n in list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+                   if n not in products]
+        check("1. manifest_products_exist", 1, not missing,
+              f"found {len(products)}/8 manifest products" if not missing
+              else f"missing products: {'; '.join(missing)}")
     except Exception as e:
-        check("1. grocy_products_with_batches_exist", 1, False, f"exception: {e}")
+        check("1. manifest_products_exist", 1, False, f"exception: {e}")
 
 
-def check_2_farmos_has_harvest_logs() -> None:
+def check_2_farmos_logs_match_manifest() -> None:
+    """FarmOS harvest logs are retrievable and consistent with the manifest:
+    every matched batch number exists verbatim, no unmatched one does."""
     try:
-        check("2. farmos_harvest_logs_exist", 1,
-              len(farmos_lots) > 0,
-              f"found {len(farmos_lots)} distinct lot numbers"
-              if farmos_lots else "no harvest logs with lot numbers found in FarmOS")
-    except Exception as e:
-        check("2. farmos_harvest_logs_exist", 1, False, f"exception: {e}")
-
-
-def check_3_matched_products_no_review_in_name() -> None:
-    try:
-        if not matched_pids:
-            check("3. matched_no_review_in_name", 2, True, "no matched products to check")
+        names = _load_farmos_harvest_names()
+        if not names:
+            check("2. farmos_logs_match_manifest", 1, False,
+                  "no harvest logs found in farmos")
             return
-        bad = [grocy_products[pid] for pid in matched_pids
-               if "[REVIEW REQUIRED]" in grocy_products[pid]["name"]]
-        check("3. matched_no_review_in_name", 2,
-              len(bad) == 0,
-              f"{len(bad)} matched product(s) incorrectly flagged: "
-              + ", ".join(f"'{p['name']}'" for p in bad[:3])
-              if bad else f"all {len(matched_pids)} matched products are clean")
+        missing = [b for b in MANIFEST_MATCHED.values() if b not in names]
+        unexpected = [b for b in MANIFEST_UNMATCHED.values() if b in names]
+        problems = []
+        if missing:
+            problems.append(f"expected logs missing: {'; '.join(missing)}")
+        if unexpected:
+            problems.append(f"unexpected logs present: {'; '.join(unexpected)}")
+        check("2. farmos_logs_match_manifest", 1, not problems,
+              f"{len(names)} harvest logs; manifest references consistent"
+              if not problems else " — ".join(problems))
     except Exception as e:
-        check("3. matched_no_review_in_name", 2, False, f"exception: {e}")
+        check("2. farmos_logs_match_manifest", 1, False, f"exception: {e}")
 
 
-def check_4_matched_products_no_discrepancy_in_desc() -> None:
+def check_3_unmatched_have_review_suffix() -> None:
+    """Every unmatched product's name ends with '[REVIEW REQUIRED]'."""
     try:
-        if not matched_pids:
-            check("4. matched_no_discrepancy_in_desc", 2, True, "no matched products to check")
-            return
-        bad = [grocy_products[pid] for pid in matched_pids
-               if "DISCREPANCY" in grocy_products[pid]["description"].upper()]
-        check("4. matched_no_discrepancy_in_desc", 2,
-              len(bad) == 0,
-              f"{len(bad)} matched product(s) incorrectly have DISCREPANCY: "
-              + ", ".join(f"'{p['name']}'" for p in bad[:3])
-              if bad else f"all {len(matched_pids)} matched products have clean descriptions")
+        products = _load_manifest_products()
+        missing = []
+        for name in MANIFEST_UNMATCHED:
+            p = products.get(name)
+            if p and REVIEW_SUFFIX in p["name"]:
+                continue
+            missing.append(name)
+        check("3. unmatched_have_review_suffix", 2, not missing,
+              f"all {len(MANIFEST_UNMATCHED)} unmatched products carry the suffix"
+              if not missing
+              else f"unmatched products missing suffix: {'; '.join(missing)}")
     except Exception as e:
-        check("4. matched_no_discrepancy_in_desc", 2, False, f"exception: {e}")
+        check("3. unmatched_have_review_suffix", 2, False, f"exception: {e}")
 
 
-def check_5_unmatched_products_have_review_in_name() -> None:
+def check_4_unmatched_have_discrepancy_note() -> None:
+    """Every unmatched product's description contains the exact discrepancy note."""
     try:
-        if not unmatched_pids:
-            check("5. unmatched_have_review_in_name", 2, True, "no unmatched products to check")
-            return
-        missing = [grocy_products[pid] for pid in unmatched_pids
-                   if "[REVIEW REQUIRED]" not in grocy_products[pid]["name"]]
-        check("5. unmatched_have_review_in_name", 2,
-              len(missing) == 0,
-              f"{len(missing)}/{len(unmatched_pids)} unmatched product(s) missing [REVIEW REQUIRED]: "
-              + ", ".join(f"'{p['name']}'" for p in missing[:3])
-              if missing else f"all {len(unmatched_pids)} unmatched products have [REVIEW REQUIRED]")
+        products = _load_manifest_products()
+        missing = []
+        for name in MANIFEST_UNMATCHED:
+            p = products.get(name)
+            if not p:
+                missing.append(f"{name} (product not found)")
+            elif DISCREPANCY_NOTE not in (p.get("description") or ""):
+                missing.append(name)
+        check("4. unmatched_have_discrepancy_note", 3, not missing,
+              f"all {len(MANIFEST_UNMATCHED)} unmatched products carry the note"
+              if not missing
+              else f"unmatched products missing note: {'; '.join(missing)}")
     except Exception as e:
-        check("5. unmatched_have_review_in_name", 2, False, f"exception: {e}")
+        check("4. unmatched_have_discrepancy_note", 3, False, f"exception: {e}")
 
 
-def check_6_unmatched_products_have_discrepancy_in_desc() -> None:
+def check_5_matched_products_clean() -> None:
+    """Matched products carry neither the name suffix nor a DISCREPANCY note.
+    Requires audit evidence first (at least one unmatched product flagged)."""
     try:
-        if not unmatched_pids:
-            check("6. unmatched_have_discrepancy_in_desc", 2, True, "no unmatched products to check")
+        products = _load_manifest_products()
+        evidence = [
+            name for name in MANIFEST_UNMATCHED
+            if products.get(name)
+            and (REVIEW_SUFFIX in products[name].get("name", "")
+                 or DISCREPANCY_NOTE in (products[name].get("description") or ""))
+        ]
+        if not evidence:
+            check("5. matched_products_clean", 2, False,
+                  "no audit evidence: no unmatched product has been flagged yet")
             return
-        missing = [grocy_products[pid] for pid in unmatched_pids
-                   if "DISCREPANCY" not in grocy_products[pid]["description"].upper()]
-        check("6. unmatched_have_discrepancy_in_desc", 2,
-              len(missing) == 0,
-              f"{len(missing)}/{len(unmatched_pids)} unmatched product(s) missing DISCREPANCY note: "
-              + ", ".join(f"'{p['name']}'" for p in missing[:3])
-              if missing else f"all {len(unmatched_pids)} unmatched products have DISCREPANCY note")
+        flagged_rows = _flagged_name_rows()
+        flagged_suffix_ids = {int(r["id"]) for r in flagged_rows}
+        desc_flagged = _flagged_desc_names()
+        bad = []
+        for name in MANIFEST_MATCHED:
+            p = products.get(name)
+            if not p:
+                continue
+            if int(p["id"]) in flagged_suffix_ids or REVIEW_SUFFIX in p["name"]:
+                bad.append(f"{name} (name suffix)")
+            if name in desc_flagged or "DISCREPANCY" in (p.get("description") or "").upper():
+                bad.append(f"{name} (description)")
+        check("5. matched_products_clean", 2, not bad,
+              f"all {len(MANIFEST_MATCHED)} matched products are clean"
+              if not bad else f"matched products wrongly flagged: {'; '.join(bad)}")
     except Exception as e:
-        check("6. unmatched_have_discrepancy_in_desc", 2, False, f"exception: {e}")
+        check("5. matched_products_clean", 2, False, f"exception: {e}")
 
 
-def check_7_discrepancy_note_exact_text() -> None:
+def check_6_note_appended_not_replaced() -> None:
+    """The discrepancy note is appended after the existing description text,
+    not used as a replacement for it."""
     try:
-        if not unmatched_pids:
-            check("7. discrepancy_exact_text", 1, True, "no unmatched products to check")
+        products = _load_manifest_products()
+        flagged = [
+            (name, products[name]["description"])
+            for name in MANIFEST_UNMATCHED
+            if products.get(name) and DISCREPANCY_NOTE in (products[name].get("description") or "")
+        ]
+        if not flagged:
+            check("6. note_appended_not_replaced", 1, False,
+                  "no flagged products found to verify append position")
             return
-        exact_phrase = "DISCREPANCY: No matching FarmOS harvest log found"
-        missing = [grocy_products[pid] for pid in unmatched_pids
-                   if exact_phrase not in grocy_products[pid]["description"]]
-        check("7. discrepancy_exact_text", 1,
-              len(missing) == 0,
-              f"{len(missing)}/{len(unmatched_pids)} missing exact phrase: "
-              + ", ".join(f"'{p['name']}'" for p in missing[:3])
-              if missing else f"all {len(unmatched_pids)} have exact discrepancy text")
+        bad = [name for name, desc in flagged
+               if desc.index(DISCREPANCY_NOTE) == 0]
+        check("6. note_appended_not_replaced", 1, not bad,
+              f"all {len(flagged)} flagged products keep their original text"
+              if not bad
+              else f"note replaces original description in: {'; '.join(bad)}")
     except Exception as e:
-        check("7. discrepancy_exact_text", 1, False, f"exception: {e}")
+        check("6. note_appended_not_replaced", 1, False, f"exception: {e}")
 
 
-def check_8_cross_app_consistency() -> None:
+def check_7_flag_targeting_exact() -> None:
+    """Store-wide, the products carrying the name suffix and the products
+    carrying the description note are both exactly the unmatched set."""
     try:
-        if not grocy_products:
-            check("8. cross_app_consistency", 3, False, "no grocy products with batches found")
+        expected = set(MANIFEST_UNMATCHED)
+        suffix_rows = _flagged_name_rows()
+        suffix_base = set()
+        for r in suffix_rows:
+            base = r["name"].replace(REVIEW_SUFFIX, "").strip()
+            suffix_base.add(base)
+        desc_flagged = {
+            r["name"].replace(REVIEW_SUFFIX, "").strip()
+            for r in grocy_sql_json(
+                "SELECT name FROM products WHERE description LIKE "
+                "'%" + DISCREPANCY_NOTE + "%'"
+            )
+        }
+
+        if not suffix_rows and not desc_flagged:
+            check("7. flag_targeting_exact", 2, False,
+                  "no products flagged anywhere in grocy")
             return
 
-        errors = []
-        for pid, info in grocy_products.items():
-            has_match = pid in matched_pids
-            has_review = "[REVIEW REQUIRED]" in info["name"]
-            has_discrepancy = "DISCREPANCY" in info["description"].upper()
+        problems = []
+        extra_suffix = sorted(suffix_base - expected)
+        missing_suffix = sorted(expected - suffix_base)
+        if extra_suffix:
+            problems.append(f"unexpected name suffixes: {'; '.join(extra_suffix)}")
+        if missing_suffix:
+            problems.append(f"missing name suffixes: {'; '.join(missing_suffix)}")
+        extra_desc = sorted(desc_flagged - expected)
+        missing_desc = sorted(expected - desc_flagged)
+        if extra_desc:
+            problems.append(f"unexpected notes: {'; '.join(extra_desc)}")
+        if missing_desc:
+            problems.append(f"missing notes: {'; '.join(missing_desc)}")
 
-            if has_match and (has_review or has_discrepancy):
-                errors.append(
-                    f"'{info['name']}' matched in FarmOS but incorrectly flagged"
-                )
-            elif not has_match and (not has_review or not has_discrepancy):
-                missing_parts = []
-                if not has_review:
-                    missing_parts.append("[REVIEW REQUIRED]")
-                if not has_discrepancy:
-                    missing_parts.append("DISCREPANCY")
-                errors.append(
-                    f"'{info['name']}' not in FarmOS but missing: "
-                    + ", ".join(missing_parts)
-                )
-
-        check("8. cross_app_consistency", 3,
-              len(errors) == 0,
-              f"{len(errors)} error(s): " + "; ".join(errors[:3])
-              if errors else f"all {len(grocy_products)} products correctly partitioned")
+        check("7. flag_targeting_exact", 2, not problems,
+              f"name suffixes and notes both cover exactly the {len(expected)} unmatched products"
+              if not problems else " — ".join(problems))
     except Exception as e:
-        check("8. cross_app_consistency", 3, False, f"exception: {e}")
+        check("7. flag_targeting_exact", 2, False, f"exception: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
-    load_data()
-
-    check_1_grocy_has_products_with_batches()
-    check_2_farmos_has_harvest_logs()
-    check_3_matched_products_no_review_in_name()
-    check_4_matched_products_no_discrepancy_in_desc()
-    check_5_unmatched_products_have_review_in_name()
-    check_6_unmatched_products_have_discrepancy_in_desc()
-    check_7_discrepancy_note_exact_text()
-    check_8_cross_app_consistency()
+    check_1_manifest_products_exist()
+    check_2_farmos_logs_match_manifest()
+    check_3_unmatched_have_review_suffix()
+    check_4_unmatched_have_discrepancy_note()
+    check_5_matched_products_clean()
+    check_6_note_appended_not_replaced()
+    check_7_flag_targeting_exact()
 
     total = sum(w for _, w, _, _ in _checks)
     earned = sum(w for _, w, p, _ in _checks if p)

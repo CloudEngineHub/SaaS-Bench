@@ -1,11 +1,25 @@
 **Task Requirements:**
-In Grocy, retrieve the list of all products that carry a real batch identifier — concretely, entries in the `stock` table whose `stock_id` is **not** an auto-generated placeholder (i.e., `stock_id` does not start with `x`). For each such `stock_id`, query FarmOS via the JSON:API endpoint `/api/log/harvest` and check whether any harvest log has an `attributes.lot_number` value that **exactly** equals that `stock_id`. If a Grocy product's `stock_id` has NO matching FarmOS harvest log, you must do two things: 1) Add a note in the Grocy product description stating 'DISCREPANCY: No matching FarmOS harvest log found', and 2) Append '[REVIEW REQUIRED]' to the product name. Do not modify products whose `stock_id` has a matching FarmOS harvest log.
+The farm's organic audit requires reconciling the warehouse's delivery manifest against FarmOS harvest records. For each Grocy product below, the manifest records a batch number, which is supposed to be the exact name of the FarmOS harvest log the delivery came from.
+
+For each product in the manifest, query FarmOS (Logs → Harvest) and check whether a harvest log exists whose name is **exactly** the batch number from the manifest (character-for-character). If a product's batch number has NO matching FarmOS harvest log, you must do two things: 1) append the note `DISCREPANCY: No matching FarmOS harvest log found` to the product's description (keep the existing description text intact and add the note after it), and 2) append `[REVIEW REQUIRED]` to the end of the product's name. Do not modify products whose batch number has a matching FarmOS harvest log. Product names refer to the Grocy product with that exact name.
+
+**Delivery manifest (Grocy product → batch number):**
+
+| Grocy product | Batch number |
+|---|---|
+| 365 Everyday Value, Fat Free Skim Milk | Cow Milk — Weekly Collection August Week 1 |
+| Clover Honey | 2024 Honey Harvest — Hive A and B |
+| Pure Raw Honey | 2024 Honey Harvest — Hive A and B |
+| Black Forest Girl, Homemade Spaetzles, Egg Noodles | 2024 Egg Collection — Weekly Tally August Week 3 |
+| Nonfat Greek Yogurt | 2024 Goat Milk Collection — Weekly Tally September Week 1 |
+| Cottage Cheese | 2024 Sheep Milk Collection — Weekly Tally August Week 3 |
+| Kfactor 22 Manuka Honey | 2024 Manuka Honey Harvest — Hive C |
+| Monterey Jack Cheese | 2024 Cow Milk — Weekly Collection September Week 2 |
 
 **Steps:**
-1. Extract all batch identifiers — i.e., `stock_id` values from rows in Grocy's `stock` table where `stock_id` does not start with `x`.
-2. For each `stock_id`, search FarmOS harvest logs for one whose `lot_number` attribute exactly equals it.
-3. Identify the Grocy products whose `stock_id` values are missing from FarmOS harvest logs.
-4. Flag the discrepant Grocy products by appending the discrepancy note to their description and `[REVIEW REQUIRED]` to their name.
+1. For each manifest entry, look up the Grocy product and search the FarmOS harvest logs for the exact batch number.
+2. Identify the products whose batch number is missing from the FarmOS harvest logs.
+3. Flag each discrepant product: append the discrepancy note to its description and `[REVIEW REQUIRED]` to its name.
 
 **Login Credentials:**
 

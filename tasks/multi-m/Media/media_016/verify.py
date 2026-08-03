@@ -1,38 +1,47 @@
 """
-Verifier for media_016: PDF paper → SiYuan structured research notes.
+Verifier for media_016: PDF paper → Booklore book entry + SiYuan paper digest
 
-Checks: 10 weighted checks (20 total points) across siyuan.
-Strategy: SiYuan REST API (SQL + notebook listing); llm_judge for content quality.
+Checks: 11 weighted checks (20pt total) across booklore and siyuan.
+Strategy: docker exec MariaDB (booklore), SiYuan REST API
+          (/api/query/sql, /api/notebook/lsNotebooks);
+          llm_judge for note/contribution content quality.
 
 Required env vars:
-  SERVER_HOSTNAME, SIYUAN_PORT, SIYUAN_CONTAINER.
+  SERVER_HOSTNAME, BOOKLORE_PORT, BOOKLORE_CONTAINER,
+  SIYUAN_PORT, SIYUAN_CONTAINER
 """
 
-import base64
-import json
 import os
-import re
-import subprocess
 import sys
-import urllib.request
-import urllib.error
+import subprocess
+import json
+import re
+
+try:
+    import requests
+except ImportError:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "requests"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    import requests
 
 # ── Config (from env) ─────────────────────────────────────────────────────────
 HOST = os.getenv("SERVER_HOSTNAME", "localhost")
-
+BOOKLORE_PORT = os.getenv("BOOKLORE_PORT")
+BOOKLORE_CONTAINER = os.getenv("BOOKLORE_CONTAINER")
 SIYUAN_PORT = os.getenv("SIYUAN_PORT")
 SIYUAN_CONTAINER = os.getenv("SIYUAN_CONTAINER")
 
-for _var_name, _var_val in [
-    ("SIYUAN_PORT", SIYUAN_PORT),
-    ("SIYUAN_CONTAINER", SIYUAN_CONTAINER),
-]:
-    if not _var_val:
-        print(f"FATAL: {_var_name} not set", file=sys.stderr)
-        sys.exit(1)
+_missing = []
+for _var in ["BOOKLORE_PORT", "BOOKLORE_CONTAINER", "SIYUAN_PORT", "SIYUAN_CONTAINER"]:
+    if not os.getenv(_var):
+        _missing.append(_var)
+if _missing:
+    print(f"FATAL: {', '.join(_missing)} not set", file=sys.stderr)
+    sys.exit(1)
 
-SIYUAN_API = f"http://{HOST}:{SIYUAN_PORT}"
-SIYUAN_TOKEN = ""
+BOOKLORE_DB_CONTAINER = os.getenv("BOOKLORE_DB_CONTAINER") or BOOKLORE_CONTAINER
 
 _INPUTS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "inputs"
@@ -41,6 +50,10 @@ _INPUTS_DIR = os.path.join(
 INPUT_FILES: list[str] = [
     os.path.join(_INPUTS_DIR, "siyuan_paper_001.pdf"),
 ]
+
+# Facts about the input paper (siyuan_paper_001.pdf)
+PAPER_TITLE = "Collaborative Knowledge Creation and Management in Information Retrieval"
+PAPER_AUTHOR_SURNAMES = ["odumuyiwa", "david"]
 
 # ── Result accumulator ────────────────────────────────────────────────────────
 _checks: list[tuple[str, int, bool, str]] = []
@@ -62,60 +75,125 @@ def docker_exec(container: str, *args: str, timeout: int = 15) -> tuple[int, str
     return r.returncode, r.stdout, r.stderr
 
 
-def get_siyuan_token() -> str:
-    global SIYUAN_TOKEN
-    if SIYUAN_TOKEN:
-        return SIYUAN_TOKEN
-    rc, stdout, _ = docker_exec(
-        SIYUAN_CONTAINER, "cat", "/siyuan/workspace/conf/conf.json", timeout=10,
+# ── Booklore helpers (MariaDB via docker exec) ────────────────────────────────
+def mariadb_query(query: str, timeout: int = 15) -> str:
+    r = subprocess.run(
+        [
+            "docker", "exec", BOOKLORE_DB_CONTAINER,
+            "mariadb", "-u", "booklore",
+            "-pChangeMe_BookLoreApp_2025!",
+            "--default-character-set=utf8mb4",
+            "-D", "booklore",
+            "-N", "-B", "-e", query,
+        ],
+        capture_output=True, text=True, timeout=timeout,
     )
-    if rc == 0 and stdout.strip():
-        try:
-            conf = json.loads(stdout)
-            SIYUAN_TOKEN = conf.get("api", {}).get("token", "")
-        except json.JSONDecodeError:
-            pass
-    return SIYUAN_TOKEN
+    if r.returncode != 0:
+        r2 = subprocess.run(
+            [
+                "docker", "exec", BOOKLORE_DB_CONTAINER,
+                "mysql", "-u", "booklore",
+                "-pChangeMe_BookLoreApp_2025!",
+                "--default-character-set=utf8mb4",
+                "-D", "booklore",
+                "-N", "-B", "-e", query,
+            ],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return r2.stdout.strip()
+    return r.stdout.strip()
 
 
-def siyuan_sql(stmt: str) -> list[dict]:
-    payload = json.dumps({"stmt": stmt}).encode()
-    headers = {"Content-Type": "application/json"}
-    token = get_siyuan_token()
-    if token:
-        headers["Authorization"] = f"Token {token}"
-    req = urllib.request.Request(
-        f"{SIYUAN_API}/api/query/sql",
-        data=payload,
-        headers=headers,
-        method="POST",
-    )
+# ── SiYuan helpers (REST API) ─────────────────────────────────────────────────
+_siyuan_auth_cached = None
+
+
+def _get_siyuan_auth() -> str:
+    global _siyuan_auth_cached
+    if _siyuan_auth_cached is not None:
+        return _siyuan_auth_cached
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"SiYuan API HTTP {e.code}: {e.read().decode()[:200]}")
-    if body.get("code") != 0:
-        raise RuntimeError(f"SiYuan API error: {body.get('msg', body)}")
-    return body.get("data") or []
+        rc, stdout, _ = docker_exec(
+            SIYUAN_CONTAINER, "cat", "/siyuan/workspace/conf/conf.json",
+            timeout=10,
+        )
+        if rc == 0 and stdout.strip():
+            conf = json.loads(stdout)
+            token = conf.get("api", {}).get("token", "")
+            if token:
+                _siyuan_auth_cached = token
+                return _siyuan_auth_cached
+    except Exception:
+        pass
+    try:
+        rc, stdout, _ = docker_exec(
+            SIYUAN_CONTAINER, "sh", "-c",
+            "cat /proc/1/cmdline | tr '\\0' '\\n'",
+        )
+        for line in stdout.splitlines():
+            if "accessAuthCode=" in line:
+                _siyuan_auth_cached = line.split("=", 1)[1].strip()
+                return _siyuan_auth_cached
+    except Exception:
+        pass
+    _siyuan_auth_cached = ""
+    return _siyuan_auth_cached
 
 
-def siyuan_api_call(endpoint: str, payload: dict = None) -> dict:
-    data = json.dumps(payload or {}).encode()
+def siyuan_api(endpoint: str, payload: dict, timeout: int = 15) -> dict:
+    url = f"http://{HOST}:{SIYUAN_PORT}{endpoint}"
     headers = {"Content-Type": "application/json"}
-    token = get_siyuan_token()
-    if token:
-        headers["Authorization"] = f"Token {token}"
-    req = urllib.request.Request(
-        f"{SIYUAN_API}{endpoint}",
-        data=data,
-        headers=headers,
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read())
+    auth = _get_siyuan_auth()
+    if auth:
+        headers["Authorization"] = f"Token {auth}"
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        return resp.json()
+    except Exception as e:
+        return {"code": -1, "msg": str(e), "data": None}
 
 
+def siyuan_sql(stmt: str) -> list:
+    result = siyuan_api("/api/query/sql", {"stmt": stmt})
+    data = result.get("data")
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def siyuan_export_md(doc_id: str) -> str:
+    """Export a document's markdown in TRUE document order.
+
+    NOTE: the blocks table's `sort` column is grouped by block type (headings,
+    paragraphs, lists), NOT document order — section extraction from
+    `ORDER BY sort` yields headings first and prose last, i.e. empty sections.
+    exportMdContent returns the document in real reading order.
+    """
+    result = siyuan_api("/api/export/exportMdContent", {"id": doc_id})
+    data = result.get("data")
+    if isinstance(data, dict):
+        return data.get("content", "") or ""
+    return ""
+
+
+def md_sections(md: str) -> list[tuple[int, str, list[str]]]:
+    """Split markdown into (heading_level, heading_text, body_lines) sections."""
+    sections: list[tuple[int, str, list[str]]] = []
+    current: list | None = None
+    for line in md.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if m:
+            if current is not None:
+                sections.append((current[0], current[1], current[2]))
+            current = [len(m.group(1)), m.group(2).strip(), []]
+        elif current is not None:
+            current[2].append(line)
+    if current is not None:
+        sections.append((current[0], current[1], current[2]))
+    return sections
+
+
+# ── LLM judge helper ──────────────────────────────────────────────────────────
 def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, str]:
     api_base = os.getenv("MINDRA_BASE_URL", "https://api.mindracode.com/v1")
     api_key = os.getenv("MINDRA_API_KEY", "")
@@ -125,376 +203,429 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         f"Content:\n{content}\n\n"
         f"Answer only YES or NO."
     )
-    body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
-    }).encode()
     try:
-        req = urllib.request.Request(
+        resp = requests.post(
             f"{api_base}/chat/completions",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
+            json={
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 512,
             },
-            method="POST",
+            timeout=timeout,
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
-        answer = data["choices"][0]["message"]["content"].strip().upper()
+        resp.raise_for_status()
+        answer = resp.json()["choices"][0]["message"]["content"].strip().upper()
         return answer.startswith("YES"), answer
     except Exception as e:
         return False, f"llm_judge error: {e}"
 
 
-# ── Cached state ──────────────────────────────────────────────────────────────
-_input_files_ok: bool = False
-_doc_root_id: str = ""
-_doc_notebook_id: str = ""
-_sections: dict[str, str] = {}
-_headings: list[str] = []
+# ── Cached lookups (booklore) ─────────────────────────────────────────────────
+_book_id: str | None = None
+_book_notes: list[str] = []
+
+
+def _find_book_id() -> str | None:
+    global _book_id
+    if _book_id:
+        return _book_id
+    for pattern in [
+        "Collaborative Knowledge Creation%Information Retrieval",
+        "Collaborative Knowledge Creation",
+        "collaborative knowledge creation",
+    ]:
+        result = mariadb_query(
+            f"SELECT bm.book_id FROM book_metadata bm "
+            f"WHERE bm.title LIKE '%{pattern}%' LIMIT 1"
+        )
+        if result and result.strip():
+            _book_id = result.strip().splitlines()[0].strip()
+            return _book_id
+    return None
+
+
+# ── Cached lookups (siyuan) ───────────────────────────────────────────────────
+_notebook_id = None
+_notebook_id_searched = False
+
+
+def _find_notebook_id() -> str | None:
+    global _notebook_id, _notebook_id_searched
+    if _notebook_id_searched:
+        return _notebook_id
+    _notebook_id_searched = True
+    result = siyuan_api("/api/notebook/lsNotebooks", {})
+    notebooks = result.get("data", {}).get("notebooks", [])
+    for nb in notebooks:
+        if nb.get("name", "").strip().lower() == "podcast scripts":
+            _notebook_id = nb["id"]
+            return _notebook_id
+    return None
+
+
+_doc_id = None
+_doc_id_searched = False
+
+
+def _find_doc() -> str | None:
+    global _doc_id, _doc_id_searched
+    if _doc_id_searched:
+        return _doc_id
+    _doc_id_searched = True
+    rows = siyuan_sql(
+        "SELECT id, content, box FROM blocks "
+        "WHERE type = 'd' AND content LIKE '%Paper Digest%Collaborative Knowledge Creation%' "
+        "LIMIT 10"
+    )
+    nb_id = _find_notebook_id()
+    for row in rows:
+        if nb_id and row.get("box") == nb_id:
+            _doc_id = row["id"]
+            return _doc_id
+    if rows:
+        _doc_id = rows[0]["id"]
+        return _doc_id
+    rows2 = siyuan_sql(
+        "SELECT id, content, box FROM blocks "
+        "WHERE type = 'd' AND content LIKE '%Paper Digest%' "
+        "LIMIT 10"
+    )
+    if rows2:
+        for row in rows2:
+            if nb_id and row.get("box") == nb_id:
+                _doc_id = row["id"]
+                return _doc_id
+        _doc_id = rows2[0]["id"]
+        return _doc_id
+    return None
+
+
+_doc_blocks_cache = None
+
+
+def _get_doc_blocks() -> list[dict]:
+    global _doc_blocks_cache
+    if _doc_blocks_cache is not None:
+        return _doc_blocks_cache
+    doc_id = _find_doc()
+    if not doc_id:
+        _doc_blocks_cache = []
+        return _doc_blocks_cache
+    rows = siyuan_sql(
+        f"SELECT id, parent_id, type, subtype, content, markdown FROM blocks "
+        f"WHERE root_id = '{doc_id}' AND type != 'd' ORDER BY sort"
+    )
+    _doc_blocks_cache = rows
+    return _doc_blocks_cache
+
+
+def _get_full_doc_text() -> str:
+    blocks = _get_doc_blocks()
+    parts = []
+    for b in blocks:
+        text = b.get("markdown") or b.get("content") or ""
+        if text.strip():
+            parts.append(text.strip())
+    return "\n".join(parts)
+
+
+def _get_intro_text() -> str:
+    """Introduction = text under an introduction-like heading, else the leading
+    paragraph lines before the first heading or list (no-heading fallback).
+
+    Uses exportMdContent: the blocks table's `sort` column is grouped by block
+    type, not document order (see siyuan_export_md).
+    """
+    doc_id = _find_doc()
+    if not doc_id:
+        return ""
+    md = siyuan_export_md(doc_id)
+    if not md.strip():
+        return ""
+    intro_kw = ["intro", "引言", "overview", "summary", "abstract", "background", "摘要"]
+    in_section = False
+    parts: list[str] = []
+    for line in md.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if m:
+            h = m.group(2).strip().lower()
+            if any(k in h for k in intro_kw):
+                in_section = True
+                parts = []
+                continue
+            elif in_section:
+                break
+        if in_section and line.strip():
+            parts.append(line.strip())
+    if parts:
+        return "\n".join(parts)
+    lead: list[str] = []
+    for line in md.splitlines():
+        if re.match(r"^#{1,6}\s", line) or re.match(r"^\s*(?:[-*+]|\d{1,2}[.)])\s", line):
+            break
+        if line.strip():
+            lead.append(line.strip())
+    return "\n".join(lead)
+
+
+def _count_numbered_items(doc_id: str) -> int:
+    full_md = _get_full_doc_text()
+    items = re.findall(r'^\s*\d{1,2}[\.\)、]\s+\S', full_md, re.MULTILINE)
+    n_regex = len(items)
+    try:
+        rows = siyuan_sql(
+            f"SELECT COUNT(*) AS c FROM blocks "
+            f"WHERE root_id = '{doc_id}' AND type = 'i' AND parent_id IN "
+            f"(SELECT id FROM blocks WHERE root_id = '{doc_id}' "
+            f"AND type = 'l' AND subtype = 'o')"
+        )
+        n_sql = int(rows[0].get("c", 0)) if rows else 0
+    except Exception:
+        n_sql = 0
+    return max(n_regex, n_sql)
 
 
 # ── Individual checks ─────────────────────────────────────────────────────────
 def check_0_input_files_exist() -> None:
-    global _input_files_ok
     missing = [p for p in INPUT_FILES if not os.path.isfile(p)]
     if missing:
         check("0. input_files_exist", 1, False, "missing: " + ", ".join(missing))
     else:
-        _input_files_ok = True
         check("0. input_files_exist", 1, True)
 
 
-def check_1_academic_sources_notebook() -> None:
+def check_1_booklore_book_exists() -> None:
     try:
-        nb_result = siyuan_api_call("/api/notebook/lsNotebooks")
-        notebooks = nb_result.get("data", {}).get("notebooks", [])
-        found = None
-        for nb in notebooks:
-            name = (nb.get("name") or "").lower()
-            if "academic" in name and "source" in name:
-                found = nb
-                break
-        if found:
-            check("1. academic_sources_notebook", 2, True,
-                  f"notebook: '{found['name']}'")
-        else:
-            nb_names = [nb.get("name", "") for nb in notebooks]
-            check("1. academic_sources_notebook", 2, False,
-                  f"no 'Academic Sources' notebook; found: {nb_names[:10]}")
-    except Exception as e:
-        check("1. academic_sources_notebook", 2, False, f"exception: {e}")
-
-
-def check_2_document_exists() -> None:
-    global _doc_root_id, _doc_notebook_id
-    try:
-        rows = siyuan_sql(
-            "SELECT id, content, box FROM blocks WHERE type = 'd' "
-            "AND (content LIKE '%Research%Collaborative IR%' "
-            "OR content LIKE '%Research:%Collaborative%IR%' "
-            "OR content LIKE '%research%collaborative ir%') "
-            "LIMIT 10;"
-        )
-        matched = None
-        for r in rows:
-            c = (r.get("content") or "").lower()
-            if "research" in c and "collaborative ir" in c:
-                matched = r
-                break
-        if not matched:
-            rows2 = siyuan_sql(
-                "SELECT id, content, box FROM blocks WHERE type = 'd' "
-                "AND content LIKE '%Collaborative%IR%' LIMIT 10;"
+        book_id = _find_book_id()
+        if book_id:
+            title_q = mariadb_query(
+                f"SELECT bm.title FROM book_metadata bm WHERE bm.book_id = {book_id}"
             )
-            for r in rows2:
-                c = (r.get("content") or "").lower()
-                if "collaborative ir" in c:
-                    matched = r
-                    break
-        if matched:
-            _doc_root_id = matched["id"]
-            _doc_notebook_id = matched.get("box", "")
-            check("2. document_exists", 2, True,
-                  f"doc: '{matched.get('content', '')[:80]}'")
+            check("1. booklore_book_exists", 2, True,
+                  f"book_id={book_id}, title='{title_q}'")
         else:
-            check("2. document_exists", 2, False,
-                  "no document matching 'Research: Collaborative IR' found")
+            all_titles = mariadb_query(
+                "SELECT bm.book_id, bm.title FROM book_metadata bm "
+                "ORDER BY bm.book_id DESC LIMIT 10"
+            )
+            check("1. booklore_book_exists", 2, False,
+                  f"no book titled like the paper found; recent: {all_titles[:200]}")
     except Exception as e:
-        check("2. document_exists", 2, False, f"exception: {e}")
+        check("1. booklore_book_exists", 2, False, f"exception: {e}")
 
 
-def _load_doc_structure() -> None:
-    global _sections, _headings
-    if not _doc_root_id or _headings:
+def check_2_booklore_author_correct() -> None:
+    book_id = _find_book_id()
+    if not book_id:
+        check("2. booklore_author_correct", 2, False, "book not found")
         return
     try:
-        rows = siyuan_sql(
-            f"SELECT content, type, markdown, subtype FROM blocks "
-            f"WHERE root_id = '{_doc_root_id}' "
-            f"AND type IN ('h', 'p', 'l', 'i') ORDER BY sort ASC;"
+        authors = mariadb_query(
+            f"SELECT a.name FROM author a "
+            f"JOIN book_metadata_author_mapping m ON a.id = m.author_id "
+            f"WHERE m.book_id = {book_id}"
         )
-        current_section = None
-        for b in rows:
-            content = b.get("content", "")
-            btype = b.get("type", "")
-            subtype = b.get("subtype", "")
-            if btype == "h":
-                _headings.append(content)
-                c_lower = content.lower()
-                if "abstract" in c_lower and "summary" in c_lower:
-                    current_section = "abstract_summary"
-                elif "core" in c_lower and "argument" in c_lower:
-                    current_section = "core_arguments"
-                elif "podcast" in c_lower and "integration" in c_lower:
-                    current_section = "podcast_integration"
-                elif "integration" in c_lower and "idea" in c_lower:
-                    current_section = "podcast_integration"
-                else:
-                    current_section = None
-                if current_section and current_section not in _sections:
-                    _sections[current_section] = ""
-            elif current_section and current_section in _sections:
-                md = b.get("markdown", "") or content
-                _sections[current_section] += md + "\n"
-    except Exception:
-        pass
+        authors_l = authors.lower()
+        passed = any(s in authors_l for s in PAPER_AUTHOR_SURNAMES)
+        check("2. booklore_author_correct", 2, passed,
+              "" if passed else
+              f"authors found: '{authors}', expected Victor Odumuyiwa / Amos David")
+    except Exception as e:
+        check("2. booklore_author_correct", 2, False, f"exception: {e}")
 
 
-def check_3_h2_abstract_summary() -> None:
+def check_3_booklore_research_shelf() -> None:
+    book_id = _find_book_id()
+    if not book_id:
+        check("3. booklore_research_shelf", 2, False, "book not found")
+        return
     try:
-        if not _doc_root_id:
-            check("3. h2_abstract_summary", 2, False, "document not found")
-            return
-        rows = siyuan_sql(
-            f"SELECT content, subtype FROM blocks "
-            f"WHERE root_id = '{_doc_root_id}' AND type = 'h' ORDER BY sort;"
+        shelves = mariadb_query(
+            f"SELECT s.name FROM shelf s "
+            f"JOIN book_shelf_mapping bsm ON s.id = bsm.shelf_id "
+            f"WHERE bsm.book_id = {book_id}"
         )
-        found = False
-        for r in rows:
-            c = (r.get("content") or "").lower()
-            sub = r.get("subtype", "")
-            if "abstract" in c and "summary" in c:
-                if sub == "h2" or not sub:
-                    found = True
-                    break
-        if found:
-            check("3. h2_abstract_summary", 2, True)
-        else:
-            headings = [(r.get("content", ""), r.get("subtype", "")) for r in rows]
-            check("3. h2_abstract_summary", 2, False,
-                  f"no H2 'Abstract Summary' heading; headings: {headings[:8]}")
+        names = [n.strip() for n in shelves.splitlines() if n.strip()]
+        passed = any(n.lower() == "research" for n in names)
+        check("3. booklore_research_shelf", 2, passed,
+              "" if passed else
+              f"book shelves: {names}, expected a shelf named 'Research'")
     except Exception as e:
-        check("3. h2_abstract_summary", 2, False, f"exception: {e}")
+        check("3. booklore_research_shelf", 2, False, f"exception: {e}")
 
 
-def check_4_h2_core_arguments() -> None:
+def check_4_booklore_notes_count() -> None:
+    global _book_notes
+    book_id = _find_book_id()
+    if not book_id:
+        check("4. booklore_notes_count", 2, False, "book not found")
+        return
     try:
-        if not _doc_root_id:
-            check("4. h2_core_arguments", 2, False, "document not found")
-            return
-        rows = siyuan_sql(
-            f"SELECT content, subtype FROM blocks "
-            f"WHERE root_id = '{_doc_root_id}' AND type = 'h' ORDER BY sort;"
-        )
-        found = False
-        for r in rows:
-            c = (r.get("content") or "").lower()
-            sub = r.get("subtype", "")
-            if "core" in c and "argument" in c:
-                if sub == "h2" or not sub:
-                    found = True
-                    break
-        if found:
-            check("4. h2_core_arguments", 2, True)
-        else:
-            headings = [(r.get("content", ""), r.get("subtype", "")) for r in rows]
-            check("4. h2_core_arguments", 2, False,
-                  f"no H2 'Core Arguments' heading; headings: {headings[:8]}")
-    except Exception as e:
-        check("4. h2_core_arguments", 2, False, f"exception: {e}")
-
-
-def check_5_h2_podcast_integration() -> None:
-    try:
-        if not _doc_root_id:
-            check("5. h2_podcast_integration", 2, False, "document not found")
-            return
-        rows = siyuan_sql(
-            f"SELECT content, subtype FROM blocks "
-            f"WHERE root_id = '{_doc_root_id}' AND type = 'h' ORDER BY sort;"
-        )
-        found = False
-        for r in rows:
-            c = (r.get("content") or "").lower()
-            sub = r.get("subtype", "")
-            if ("podcast" in c and "integration" in c) or \
-               ("integration" in c and "idea" in c):
-                if sub == "h2" or not sub:
-                    found = True
-                    break
-        if found:
-            check("5. h2_podcast_integration", 2, True)
-        else:
-            headings = [(r.get("content", ""), r.get("subtype", "")) for r in rows]
-            check("5. h2_podcast_integration", 2, False,
-                  f"no H2 'Podcast Integration Ideas' heading; headings: {headings[:8]}")
-    except Exception as e:
-        check("5. h2_podcast_integration", 2, False, f"exception: {e}")
-
-
-def check_6_abstract_summary_content() -> None:
-    try:
-        if not _doc_root_id:
-            check("6. abstract_summary_content", 2, False, "document not found")
-            return
-        _load_doc_structure()
-        abstract = _sections.get("abstract_summary", "")
-        char_count = len(abstract.strip())
-        if char_count >= 100:
-            check("6. abstract_summary_content", 2, True,
-                  f"{char_count} chars")
-        else:
-            check("6. abstract_summary_content", 2, False,
-                  f"abstract summary too short: {char_count} chars (need ≥100)")
-    except Exception as e:
-        check("6. abstract_summary_content", 2, False, f"exception: {e}")
-
-
-def check_7_core_arguments_bullets() -> None:
-    try:
-        if not _doc_root_id:
-            check("7. core_arguments_≥3_bullets", 2, False, "document not found")
-            return
-        _load_doc_structure()
-        core_text = _sections.get("core_arguments", "")
-        bullets = [
-            line.strip() for line in core_text.split("\n")
-            if line.strip() and (
-                line.strip().startswith("- ") or
-                line.strip().startswith("* ") or
-                line.strip().startswith("+ ") or
-                re.match(r"^\d+[\.\)]\s", line.strip())
+        notes_list: list[str] = []
+        note_count = 0
+        for table, col in [("book_notes_v2", "note_content"), ("book_notes", "content"),
+                           ("annotations", "note")]:
+            count_str = mariadb_query(
+                f"SELECT COUNT(*) FROM {table} WHERE book_id = {book_id}"
             )
-        ]
-        if not bullets:
-            rows = siyuan_sql(
-                f"SELECT id FROM blocks WHERE root_id = '{_doc_root_id}' "
-                f"AND type = 'i' ORDER BY sort;"
-            )
-            heading_rows = siyuan_sql(
-                f"SELECT id, content FROM blocks WHERE root_id = '{_doc_root_id}' "
-                f"AND type = 'h' ORDER BY sort;"
-            )
-            core_heading_id = None
-            next_heading_sort = None
-            for i, h in enumerate(heading_rows):
-                c = (h.get("content") or "").lower()
-                if "core" in c and "argument" in c:
-                    core_heading_id = h["id"]
-                    break
-
-            if core_heading_id:
-                all_blocks = siyuan_sql(
-                    f"SELECT type, content FROM blocks WHERE root_id = '{_doc_root_id}' "
-                    f"AND type = 'i' ORDER BY sort;"
+            if count_str and int(count_str) > 0:
+                note_count = int(count_str)
+                result = mariadb_query(
+                    f"SELECT {col} FROM {table} WHERE book_id = {book_id}"
                 )
-                bullet_count = len(all_blocks)
-            else:
-                bullet_count = 0
-        else:
-            bullet_count = len(bullets)
-
-        if bullet_count >= 3:
-            check("7. core_arguments_≥3_bullets", 2, True,
-                  f"{bullet_count} bullet points found")
-        else:
-            check("7. core_arguments_≥3_bullets", 2, False,
-                  f"found {bullet_count} bullets, need ≥3")
+                if result:
+                    notes_list = [l.strip() for l in result.strip().splitlines()
+                                  if l.strip()]
+                break
+        _book_notes = notes_list
+        if note_count == 0:
+            note_count = len(notes_list)
+        passed = note_count >= 2
+        check("4. booklore_notes_count", 2, passed,
+              f"count={note_count}" if passed else
+              f"found {note_count} notes, need >=2")
     except Exception as e:
-        check("7. core_arguments_≥3_bullets", 2, False, f"exception: {e}")
+        check("4. booklore_notes_count", 2, False, f"exception: {e}")
 
 
-def check_8_podcast_integration_2_ideas() -> None:
+def check_5_booklore_notes_quality() -> None:
+    if not _book_notes:
+        check("5. booklore_notes_quality", 2, False, "no notes available")
+        return
     try:
-        if not _doc_root_id:
-            check("8. podcast_integration_2_ideas", 2, False, "document not found")
-            return
-        _load_doc_structure()
-        podcast_text = _sections.get("podcast_integration", "")
-        ideas = [
-            line.strip() for line in podcast_text.split("\n")
-            if line.strip() and (
-                line.strip().startswith("- ") or
-                line.strip().startswith("* ") or
-                line.strip().startswith("+ ") or
-                re.match(r"^\d+[\.\)]\s", line.strip())
+        combined = "\n---\n".join(f"Note {i+1}: {n}" for i, n in enumerate(_book_notes))
+        condition = (
+            "The notes are reading notes about the research paper 'Collaborative "
+            "Knowledge Creation and Management in Information Retrieval'. They discuss "
+            "specific aspects of the paper, such as collaborative information retrieval "
+            "(CIR), collaborative information behaviour, knowledge creation through "
+            "Nonaka's knowledge conversion processes, the MECOCIR prototype and its "
+            "functional architecture, or annotation/knowledge organization features. "
+            "Different notes address different sections or contributions of the paper. "
+            "Generic remarks (e.g. 'interesting paper', 'must read') do not count."
+        )
+        passed, raw = llm_judge(combined, condition)
+        check("5. booklore_notes_quality", 2, passed, f"llm_judge: {raw}")
+    except Exception as e:
+        check("5. booklore_notes_quality", 2, False, f"exception: {e}")
+
+
+def check_6_siyuan_doc_exists() -> None:
+    try:
+        doc_id = _find_doc()
+        passed = doc_id is not None
+        detail = ""
+        if passed:
+            nb_id = _find_notebook_id()
+            rows = siyuan_sql(
+                f"SELECT box FROM blocks WHERE id = '{doc_id}' AND type = 'd' LIMIT 1"
             )
-        ]
-        if not ideas:
-            paragraphs = [
-                p.strip() for p in podcast_text.split("\n")
-                if p.strip() and len(p.strip()) > 20
-            ]
-            idea_count = len(paragraphs)
+            if nb_id and rows and rows[0].get("box") != nb_id:
+                detail = "document found but not in 'Podcast Scripts' notebook"
+            elif not nb_id:
+                detail = "document found but no 'Podcast Scripts' notebook exists"
         else:
-            idea_count = len(ideas)
-
-        if idea_count >= 2:
-            check("8. podcast_integration_2_ideas", 2, True,
-                  f"{idea_count} ideas found")
-        else:
-            check("8. podcast_integration_2_ideas", 2, False,
-                  f"found {idea_count} ideas, need ≥2")
+            detail = "no document matching 'Paper Digest: <paper title>' found"
+        check("6. siyuan_doc_exists", 2, passed, detail)
     except Exception as e:
-        check("8. podcast_integration_2_ideas", 2, False, f"exception: {e}")
+        check("6. siyuan_doc_exists", 2, False, f"exception: {e}")
 
 
-def check_9_cross_modal_pdf_consistency() -> None:
+def check_7_siyuan_intro_length() -> None:
+    if not _find_doc():
+        check("7. siyuan_intro_length", 1, False, "doc not found")
+        return
     try:
-        if not _input_files_ok:
-            check("9. cross_modal_pdf_consistency", 3, False,
-                  "skipped: input file missing")
-            return
-        if not _doc_root_id:
-            check("9. cross_modal_pdf_consistency", 3, False,
-                  "skipped: document not found")
-            return
-        _load_doc_structure()
-        abstract = _sections.get("abstract_summary", "")
-        core = _sections.get("core_arguments", "")
-        doc_content = (abstract + "\n" + core).strip()
-        if len(doc_content) < 50:
-            check("9. cross_modal_pdf_consistency", 3, False,
-                  "document content too short for cross-modal check")
+        text = _get_intro_text()
+        n = len(text.strip())
+        passed = n >= 100
+        check("7. siyuan_intro_length", 1, passed,
+              "" if passed else f"intro is {n} chars, need >=100")
+    except Exception as e:
+        check("7. siyuan_intro_length", 1, False, f"exception: {e}")
+
+
+def check_8_siyuan_numbered_contributions() -> None:
+    doc_id = _find_doc()
+    if not doc_id:
+        check("8. siyuan_numbered_contributions", 2, False, "doc not found")
+        return
+    try:
+        n = _count_numbered_items(doc_id)
+        passed = n >= 3
+        check("8. siyuan_numbered_contributions", 2, passed,
+              "" if passed else f"found {n} numbered items, need >=3")
+    except Exception as e:
+        check("8. siyuan_numbered_contributions", 2, False, f"exception: {e}")
+
+
+def check_9_siyuan_contributions_relevance() -> None:
+    if not _find_doc():
+        check("9. siyuan_contributions_relevance", 2, False, "doc not found")
+        return
+    try:
+        full_text = _get_full_doc_text()
+        if not full_text:
+            check("9. siyuan_contributions_relevance", 2, False,
+                  "document empty or not found")
             return
         condition = (
-            "The document content is a substantive summary and analysis of a research paper "
-            "about Collaborative Knowledge Creation and Management in Information Retrieval. "
-            "The abstract summary accurately reflects themes of collaborative IR, knowledge "
-            "creation, or information retrieval research. The core arguments are relevant to "
-            "the academic paper's subject matter, not generic filler."
+            "The document lists core contributions of the research paper "
+            "'Collaborative Knowledge Creation and Management in Information "
+            "Retrieval'. The listed contributions are specific to this paper — for "
+            "example: explaining collaborative information retrieval (CIR) and how it "
+            "culminates in knowledge creation, how created knowledge is organized and "
+            "structured, the functional architecture of the MECOCIR prototype and its "
+            "features for collaborative knowledge exploitation, or the use of Nonaka's "
+            "knowledge conversion/transformation processes in CIR. The contributions "
+            "must reflect the paper's actual content on information retrieval and "
+            "knowledge creation, not generic statements that could apply to any paper."
         )
-        passed, raw = llm_judge(doc_content[:3000], condition)
-        check("9. cross_modal_pdf_consistency", 3, passed, f"llm_judge: {raw}")
+        passed, raw = llm_judge(full_text[:4000], condition)
+        check("9. siyuan_contributions_relevance", 2, passed,
+              "" if passed else f"llm_judge: {raw}")
     except Exception as e:
-        check("9. cross_modal_pdf_consistency", 3, False, f"exception: {e}")
+        check("9. siyuan_contributions_relevance", 2, False, f"exception: {e}")
+
+
+def check_10_siyuan_booklore_url() -> None:
+    if not _find_doc():
+        check("10. siyuan_booklore_url", 2, False, "doc not found")
+        return
+    try:
+        full_md = _get_full_doc_text()
+        urls = re.findall(r'https?://[^\s)\]>"\']+', full_md)
+        has_booklore = any("booklore" in u.lower() for u in urls)
+        if not has_booklore and BOOKLORE_PORT:
+            has_booklore = any(f":{BOOKLORE_PORT}" in u for u in urls)
+        if not has_booklore:
+            has_booklore = any(
+                re.search(r"/(book|library|shelf)", u, re.IGNORECASE) for u in urls
+            )
+        if not has_booklore and urls and "booklore" in full_md.lower():
+            has_booklore = True
+        check("10. siyuan_booklore_url", 2, has_booklore,
+              "" if has_booklore else
+              f"found {len(urls)} URLs, none recognizable as a Booklore book entry")
+    except Exception as e:
+        check("10. siyuan_booklore_url", 2, False, f"exception: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
     check_0_input_files_exist()
-    check_1_academic_sources_notebook()
-    check_2_document_exists()
-    check_3_h2_abstract_summary()
-    check_4_h2_core_arguments()
-    check_5_h2_podcast_integration()
-    check_6_abstract_summary_content()
-    check_7_core_arguments_bullets()
-    check_8_podcast_integration_2_ideas()
-    check_9_cross_modal_pdf_consistency()
+    check_1_booklore_book_exists()
+    check_2_booklore_author_correct()
+    check_3_booklore_research_shelf()
+    check_4_booklore_notes_count()
+    check_5_booklore_notes_quality()
+    check_6_siyuan_doc_exists()
+    check_7_siyuan_intro_length()
+    check_8_siyuan_numbered_contributions()
+    check_9_siyuan_contributions_relevance()
+    check_10_siyuan_booklore_url()
 
     total = sum(w for _, w, _, _ in _checks)
     earned = sum(w for _, w, p, _ in _checks if p)

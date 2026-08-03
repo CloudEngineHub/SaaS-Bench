@@ -108,8 +108,8 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         resp = requests.post(
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview", "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 10},
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"), "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -147,7 +147,7 @@ def llm_judge_vision(
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -156,7 +156,7 @@ def llm_judge_vision(
                         {"type": "text", "text": prompt},
                     ],
                 }],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )

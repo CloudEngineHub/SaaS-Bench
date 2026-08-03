@@ -11,6 +11,7 @@ Required env vars:
 import base64
 import json
 import os
+import re
 import sys
 import subprocess
 import urllib.request
@@ -135,6 +136,52 @@ def siyuan_sql(stmt: str) -> list[dict]:
     return body.get("data") or []
 
 
+def siyuan_export_md(doc_id: str) -> str:
+    """Export a document's markdown in TRUE document order.
+
+    NOTE: the blocks table's `sort` column is grouped by block type (headings,
+    paragraphs, lists), NOT document order — section extraction from
+    `ORDER BY sort` yields headings first and prose last, i.e. empty sections.
+    exportMdContent returns the document in real reading order.
+    """
+    payload = json.dumps({"id": doc_id}).encode()
+    headers = {"Content-Type": "application/json"}
+    token = get_siyuan_token()
+    if token:
+        headers["Authorization"] = f"Token {token}"
+    req = urllib.request.Request(
+        f"{SIYUAN_API}/api/export/exportMdContent",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"SiYuan export HTTP {e.code}: {e.read().decode()[:200]}")
+    if body.get("code") != 0:
+        raise RuntimeError(f"SiYuan export error: {body.get('msg', body)}")
+    return body.get("data", {}).get("content", "")
+
+
+def md_sections(md: str) -> list[tuple[int, str, list[str]]]:
+    """Split markdown into (heading_level, heading_text, body_lines) sections."""
+    sections: list[tuple[int, str, list[str]]] = []
+    current: list | None = None
+    for line in md.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if m:
+            if current is not None:
+                sections.append((current[0], current[1], current[2]))
+            current = [len(m.group(1)), m.group(2).strip(), []]
+        elif current is not None:
+            current[2].append(line)
+    if current is not None:
+        sections.append((current[0], current[1], current[2]))
+    return sections
+
+
 def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, str]:
     api_base = os.getenv("MINDRA_BASE_URL", "https://api.mindracode.com/v1")
     api_key = os.getenv("MINDRA_API_KEY", "")
@@ -145,9 +192,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         f"Answer only YES or NO."
     )
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -202,9 +249,9 @@ def llm_judge_vision(
         {"type": "text", "text": prompt},
     ]
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": msg_content}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -248,8 +295,9 @@ def check_1_watcharr_encanto_exists() -> None:
         rows = watcharr_sql(
             "SELECT w.status, w.rating, w.thoughts, c.title "
             "FROM watcheds w JOIN contents c ON w.content_id = c.id "
-            "WHERE LOWER(c.title) LIKE '%encanto%' "
-            "AND w.deleted_at IS NULL LIMIT 1;"
+            "JOIN users u ON w.user_id = u.id "
+            "WHERE LOWER(c.title) LIKE '%encanto%' AND u.username = 'admin' "
+            "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC LIMIT 1;"
         )
         if not rows:
             check("1. watcharr_encanto_exists", 2, False,
@@ -325,7 +373,11 @@ def check_5_cross_modal_poster_title() -> None:
         if not _input_files_ok:
             check("5. cross_modal_poster_title", 2, False, "skipped: input file missing")
             return
-        title = _watcharr_row.get("title", "Encanto") if _watcharr_row else "Encanto"
+        if not _watcharr_row or not _watcharr_row.get("title"):
+            check("5. cross_modal_poster_title", 2, False,
+                  "no Encanto entry in watcharr to validate")
+            return
+        title = _watcharr_row["title"]
         condition = (
             "The movie poster shown is for the Disney animated film 'Encanto' (2021). "
             "The title visible on the poster or the characters/imagery match the recorded value."
@@ -398,31 +450,21 @@ def check_8_siyuan_ep49_content_thresholds() -> None:
         if not _ep49_root_id:
             check("8. siyuan_ep49_content_thresholds", 2, False, "EP-49 doc not found")
             return
-        rows = siyuan_sql(
-            f"SELECT content, type FROM blocks "
-            f"WHERE root_id = '{_ep49_root_id}' AND type IN ('h', 'p', 'l', 'i') "
-            f"ORDER BY sort ASC;"
-        )
+        md = siyuan_export_md(_ep49_root_id)
         section_keys = {
             "introduction": "intro", "引言": "intro", "intro": "intro",
             "visual analysis": "visual", "视觉分析": "visual", "visual": "visual",
             "conclusion": "conclusion", "结论": "conclusion", "结语": "conclusion", "总结": "conclusion",
         }
         sections: dict[str, str] = {}
-        current_section = None
-        for b in rows:
-            content = b.get("content", "")
-            if b.get("type") == "h":
-                current_section = None
-                content_lower = content.lower()
-                for kw, label in section_keys.items():
-                    if kw in content_lower:
-                        current_section = label
-                        if label not in sections:
-                            sections[label] = ""
-                        break
-            elif current_section and current_section in sections:
-                sections[current_section] += content + "\n"
+        for _lvl, title, lines in md_sections(md):
+            title_lower = title.lower()
+            for kw, label in section_keys.items():
+                if kw in title_lower:
+                    if label not in sections:
+                        sections[label] = ""
+                    sections[label] += "\n".join(lines) + "\n"
+                    break
 
         issues = []
         intro_len = len(sections.get("intro", "").strip())
@@ -451,23 +493,13 @@ def check_9_cross_modal_visual_analysis() -> None:
         if not _ep49_root_id:
             check("9. cross_modal_visual_analysis", 2, False, "EP-49 doc not found")
             return
-        rows = siyuan_sql(
-            f"SELECT content, type FROM blocks "
-            f"WHERE root_id = '{_ep49_root_id}' AND type IN ('h', 'p', 'l', 'i') "
-            f"ORDER BY sort ASC;"
-        )
+        md = siyuan_export_md(_ep49_root_id)
         visual_text = ""
-        in_visual = False
-        for b in rows:
-            content = b.get("content", "")
-            if b.get("type") == "h":
-                content_lower = content.lower()
-                if "visual analysis" in content_lower or "visual" in content_lower or "视觉分析" in content_lower:
-                    in_visual = True
-                elif in_visual:
-                    break
-            elif in_visual:
-                visual_text += content + "\n"
+        for _lvl, title, lines in md_sections(md):
+            tl = title.lower()
+            if "visual analysis" in tl or "visual" in tl or "视觉分析" in tl:
+                visual_text = "\n".join(lines) + "\n"
+                break
 
         if len(visual_text.strip()) < 20:
             check("9. cross_modal_visual_analysis", 2, False,

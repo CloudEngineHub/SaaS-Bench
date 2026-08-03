@@ -1,5 +1,5 @@
 **Task Requirements:**
-Look at the provided poster for 'Encanto'. In Watcharr, track this film, rate it 9/10, and write a review (≥60 chars) focusing on its use of color and magical realism. In SiYuan, create a document titled 'EP-49: The Colors of Magic' with three sections: 'Introduction', 'Visual Analysis', and 'Conclusion'. Ensure the 'Visual Analysis' section directly references the color palette observed in the poster. Add a bidirectional link to an 'Animation Studios' document (create it if absent).
+Look at the provided poster for 'Encanto'. In Watcharr, track this film, rate it 9/10, and write a review (≥60 chars) focusing on its use of color and magical realism. In SiYuan, create a document titled 'EP-49: The Colors of Magic' with three sections: 'Introduction', 'Visual Analysis', and 'Conclusion'. Ensure the 'Visual Analysis' section directly references the color palette observed in the poster. Create (if absent) an 'Animation Studios' document and establish a bidirectional link between the two documents: add a link to 'Animation Studios' inside the EP-49 document, and a link back to EP-49 inside the 'Animation Studios' document.
 
 **Steps:**
 1. Identify the film 'Encanto' from the provided poster.

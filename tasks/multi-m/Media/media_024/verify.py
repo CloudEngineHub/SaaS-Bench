@@ -2,7 +2,7 @@
 Verifier for media_024: Spider-Man poster → Watcharr review + Booklore graphic novel + SiYuan comparison episode
 
 Checks: 14 weighted checks (24 total points) across watcharr, booklore, siyuan.
-Strategy: docker exec SQLite (watcharr), docker exec MariaDB (booklore), REST API (siyuan),
+Strategy: host-side SQLite via docker cp (watcharr), docker exec MariaDB (booklore), REST API (siyuan),
           llm_judge + llm_judge_vision for content quality and cross-modal consistency.
 
 Required env vars:
@@ -45,7 +45,7 @@ if _missing:
     print(f"FATAL: {', '.join(_missing)} not set", file=sys.stderr)
     sys.exit(1)
 
-BOOKLORE_DB_CONTAINER = os.getenv("BOOKLORE_DB_CONTAINER", BOOKLORE_CONTAINER + "-db")
+BOOKLORE_DB_CONTAINER = os.getenv("BOOKLORE_DB_CONTAINER") or BOOKLORE_CONTAINER
 
 _INPUTS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "inputs"
@@ -103,23 +103,39 @@ def _find_watcharr_db() -> str:
 
 
 def watcharr_sql(sql: str, timeout: int = 15) -> tuple[int, str, str]:
+    """Query Watcharr's SQLite DB.
+
+    The mw-watcharr image ships no sqlite3 CLI and the container has no
+    outbound network to install one, so docker cp the DB (plus WAL sidecars)
+    to a host temp dir and query it with Python's sqlite3 module. Output
+    mimics `sqlite3 -separator "\t"`.
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+
     db = _find_watcharr_db()
-    rc, out, err = docker_exec(
-        WATCHARR_CONTAINER, "sqlite3", "-separator", "\t", db, sql,
-        timeout=timeout,
-    )
-    if rc != 0 and ("not found" in err.lower() or "executable file" in err.lower()):
-        docker_exec(
-            WATCHARR_CONTAINER, "sh", "-c",
-            "apk add --no-cache sqlite 2>/dev/null || "
-            "(apt-get update -qq && apt-get install -y -qq sqlite3) 2>/dev/null",
-            timeout=60,
-        )
-        rc, out, err = docker_exec(
-            WATCHARR_CONTAINER, "sqlite3", "-separator", "\t", db, sql,
-            timeout=timeout,
-        )
-    return rc, out, err
+    tmpdir = tempfile.mkdtemp(prefix="watcharr_verify_")
+    try:
+        local_db = os.path.join(tmpdir, os.path.basename(db))
+        r = subprocess.run(["docker", "cp", f"{WATCHARR_CONTAINER}:{db}", local_db],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            return r.returncode, "", r.stderr
+        for suffix in ("-wal", "-shm"):
+            subprocess.run(["docker", "cp", f"{WATCHARR_CONTAINER}:{db}{suffix}", tmpdir],
+                           capture_output=True, text=True, timeout=timeout)
+        con = sqlite3.connect(local_db)
+        try:
+            rows = con.execute(sql).fetchall()
+        finally:
+            con.close()
+        out = "\n".join("\t".join("" if v is None else str(v) for v in row) for row in rows)
+        return 0, (out + "\n") if out else "", ""
+    except Exception as e:
+        return 1, "", str(e)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # -- Booklore helpers (MariaDB via docker exec) --------------------------------
@@ -197,6 +213,37 @@ def siyuan_sql(stmt: str) -> list:
     return []
 
 
+def siyuan_export_md(doc_id: str) -> str:
+    """Export a document's markdown in TRUE document order.
+
+    NOTE: the blocks table's `sort` column is grouped by block type (headings,
+    paragraphs, lists), NOT document order — section extraction from
+    `ORDER BY sort` yields headings first and prose last, i.e. empty sections.
+    exportMdContent returns the document in real reading order.
+    """
+    data = siyuan_api("/api/export/exportMdContent", {"id": doc_id})
+    if isinstance(data, dict):
+        return data.get("content", "") or ""
+    return ""
+
+
+def md_sections(md: str) -> list[tuple[int, str, list[str]]]:
+    """Split markdown into (heading_level, heading_text, body_lines) sections."""
+    sections: list[tuple[int, str, list[str]]] = []
+    current: list | None = None
+    for line in md.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if m:
+            if current is not None:
+                sections.append((current[0], current[1], current[2]))
+            current = [len(m.group(1)), m.group(2).strip(), []]
+        elif current is not None:
+            current[2].append(line)
+    if current is not None:
+        sections.append((current[0], current[1], current[2]))
+    return sections
+
+
 # -- LLM judge helpers ---------------------------------------------------------
 def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, str]:
     api_base = os.getenv("MINDRA_BASE_URL", "https://api.mindracode.com/v1")
@@ -212,9 +259,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview",
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                   "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 10},
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -263,9 +310,9 @@ def llm_judge_vision(
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview",
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                   "messages": [{"role": "user", "content": msg_content}],
-                  "max_tokens": 10},
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -302,50 +349,48 @@ def check_1_watcharr_film_exists() -> None:
             "SELECT c.id, c.title, w.status, w.rating, w.thoughts "
             "FROM contents c "
             "JOIN watcheds w ON w.content_id = c.id "
-            "WHERE c.type = 'movie' "
+            "JOIN users u ON w.user_id = u.id "
+            "WHERE c.type = 'movie' AND u.username = 'admin' "
             "AND w.deleted_at IS NULL "
-            "ORDER BY w.id DESC LIMIT 30;"
+            "AND LOWER(c.title) LIKE '%spider-man%no way home%' "
+            "ORDER BY w.updated_at DESC LIMIT 1;"
         )
         if rc != 0:
             check("1. watcharr_film_exists", 2, False, f"sqlite error: {err.strip()[:200]}")
             return
         lines = [l for l in out.strip().splitlines() if l.strip()]
         if not lines:
-            check("1. watcharr_film_exists", 2, False, "no watched movies found")
-            return
-        for line in lines:
-            parts = line.split("\t")
-            title = parts[1] if len(parts) > 1 else ""
-            if "spider" in title.lower() and "no way home" in title.lower():
-                _watcharr_row = {
-                    "content_id": parts[0] if len(parts) > 0 else "",
-                    "title": title,
-                    "status": parts[2] if len(parts) > 2 else "",
-                    "rating": parts[3] if len(parts) > 3 else "",
-                    "thoughts": parts[4] if len(parts) > 4 else "",
-                }
-                check("1. watcharr_film_exists", 2, True, f"found: {title}")
+            rc2, fallback, _ = watcharr_sql(
+                "SELECT c.id, c.title, w.status, w.rating, w.thoughts "
+                "FROM contents c "
+                "JOIN watcheds w ON w.content_id = c.id "
+                "JOIN users u ON w.user_id = u.id "
+                "WHERE c.type = 'movie' AND u.username = 'admin' "
+                "AND w.deleted_at IS NULL AND LOWER(c.title) LIKE '%spider%' "
+                "ORDER BY w.updated_at DESC LIMIT 1;"
+            )
+            fb_lines = [l for l in fallback.strip().splitlines() if l.strip()]
+            if rc2 == 0 and fb_lines:
+                lines = fb_lines
+            else:
+                rc3, all_titles, _ = watcharr_sql(
+                    "SELECT c.title FROM contents c JOIN watcheds w ON w.content_id = c.id "
+                    "JOIN users u ON w.user_id = u.id "
+                    "WHERE u.username = 'admin' AND w.deleted_at IS NULL LIMIT 10;"
+                )
+                check("1. watcharr_film_exists", 2, False,
+                      f"no Spider-Man: No Way Home entry found for admin; "
+                      f"watched titles: {all_titles.strip()[:200]}")
                 return
-        for line in lines:
-            parts = line.split("\t")
-            title = parts[1] if len(parts) > 1 else ""
-            if "spider" in title.lower():
-                _watcharr_row = {
-                    "content_id": parts[0] if len(parts) > 0 else "",
-                    "title": title,
-                    "status": parts[2] if len(parts) > 2 else "",
-                    "rating": parts[3] if len(parts) > 3 else "",
-                    "thoughts": parts[4] if len(parts) > 4 else "",
-                }
-                check("1. watcharr_film_exists", 2, True,
-                      f"found (partial match): {title}")
-                return
-        all_titles = "; ".join(
-            l.split("\t")[1] if len(l.split("\t")) > 1 else "?"
-            for l in lines[:5]
-        )
-        check("1. watcharr_film_exists", 2, False,
-              f"no Spider-Man movie found; recent: {all_titles}")
+        parts = lines[0].split("\t")
+        _watcharr_row = {
+            "content_id": parts[0] if len(parts) > 0 else "",
+            "title": parts[1] if len(parts) > 1 else "",
+            "status": parts[2] if len(parts) > 2 else "",
+            "rating": parts[3] if len(parts) > 3 else "",
+            "thoughts": parts[4] if len(parts) > 4 else "",
+        }
+        check("1. watcharr_film_exists", 2, True, f"found: {_watcharr_row['title']}")
     except Exception as e:
         check("1. watcharr_film_exists", 2, False, f"exception: {e}")
 
@@ -599,42 +644,29 @@ def check_12_siyuan_structure() -> None:
         check("12. siyuan_structure", 3, False, "doc not found")
         return
     try:
-        headings = [b.get("content", "") for b in _doc_blocks if b.get("type") == "h"]
-        full_md = "\n".join(
-            b.get("markdown", "") or b.get("content", "")
-            for b in _doc_blocks
-        )
+        full_md = siyuan_export_md(_doc_id)
+        sections = md_sections(full_md)
+        headings = [title for _lvl, title, _lines in sections]
 
+        # Intro: body of the first intro-like heading's section; fallback to the
+        # leading paragraphs before the first heading (no-heading docs).
         has_intro = False
         intro_text = ""
-        for b in _doc_blocks:
-            if b.get("type") == "h":
-                hl = b.get("content", "").lower()
-                if any(kw in hl for kw in ["intro", "introduction", "引言", "开场"]):
-                    has_intro = True
+        lead_lines: list[str] = []
+        for line in full_md.splitlines():
+            if re.match(r"^#{1,6}\s", line):
                 break
-            intro_text += b.get("content", "") + " "
-
-        if not has_intro:
-            first_heading_idx = -1
-            second_heading_idx = -1
-            for i, b in enumerate(_doc_blocks):
-                if b.get("type") == "h":
-                    if first_heading_idx == -1:
-                        first_heading_idx = i
-                    elif second_heading_idx == -1:
-                        second_heading_idx = i
-                        break
-            if first_heading_idx >= 0:
-                hl = _doc_blocks[first_heading_idx].get("content", "").lower()
-                if any(kw in hl for kw in ["intro", "introduction", "引言", "开场"]):
-                    has_intro = True
-                    end = second_heading_idx if second_heading_idx > 0 else len(_doc_blocks)
-                    intro_text = " ".join(
-                        b.get("content", "")
-                        for b in _doc_blocks[first_heading_idx + 1:end]
-                        if b.get("type") != "h"
-                    )
+            if line.strip():
+                lead_lines.append(line.strip())
+        intro_text = " ".join(lead_lines)
+        for _lvl, title, lines in sections:
+            tl = title.lower()
+            if any(kw in tl for kw in ["intro", "introduction", "引言", "开场"]):
+                has_intro = True
+                body = " ".join(l.strip() for l in lines if l.strip())
+                if len(body) > len(intro_text):
+                    intro_text = body
+                break
 
         if not has_intro and len(intro_text.strip()) >= 120:
             has_intro = True

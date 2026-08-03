@@ -96,9 +96,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview",
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                   "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 10},
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -132,7 +132,7 @@ def llm_judge_vision(
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -141,7 +141,7 @@ def llm_judge_vision(
                         {"type": "text", "text": prompt},
                     ],
                 }],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )
@@ -326,7 +326,7 @@ def check_4_input_log_pyrethrin_omri() -> None:
 
 
 def check_5_input_log_details() -> None:
-    """Input log notes contain 200 mL/acre, Li Shifu, Power Sprayer No. 1."""
+    """Input log notes contain 200 mL/acre, Li Shifu, Tractor-Mounted Boom Sprayer."""
     try:
         if not _input_logs:
             check("5. input_log_details", 2, False, "no input logs on corn asset")
@@ -342,7 +342,7 @@ def check_5_input_log_details() -> None:
                 found_rate = True
             if "li shifu" in notes or "li_shifu" in notes:
                 found_operator = True
-            if "power sprayer" in notes or "sprayer no" in notes:
+            if "boom sprayer" in notes or "tractor-mounted" in notes:
                 found_sprayer = True
 
         if not found_operator:
@@ -374,7 +374,7 @@ def check_5_input_log_details() -> None:
         if not found_operator:
             missing.append("Li Shifu")
         if not found_sprayer:
-            missing.append("Power Sprayer No. 1")
+            missing.append("Tractor-Mounted Boom Sprayer")
         passed = not missing
         check("5. input_log_details", 2, passed,
               f"missing: {', '.join(missing)}" if missing else "")
@@ -472,15 +472,13 @@ def check_8_followup_reduction_notes() -> None:
 
 
 def check_9_equipment_maintenance_log() -> None:
-    """Equipment asset 'Power Sprayer No. 1' has a Maintenance log for post-spray cleaning."""
+    """Equipment asset 'Tractor-Mounted Boom Sprayer' has a Maintenance log for post-spray cleaning."""
     try:
         rows = php_query(
             "SELECT id, name FROM asset_field_data "
             "WHERE type = 'equipment' "
-            "AND (LOWER(name) LIKE '%power sprayer%' "
-            "OR LOWER(name) LIKE '%sprayer no%' "
-            "OR LOWER(name) LIKE '%sprayer #1%' "
-            "OR LOWER(name) LIKE '%sprayer 1%') "
+            "AND (LOWER(name) LIKE '%boom sprayer%' "
+            "OR LOWER(name) LIKE '%tractor-mounted%') "
             "LIMIT 5"
         )
         if not rows:

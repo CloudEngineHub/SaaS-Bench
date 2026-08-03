@@ -14,6 +14,7 @@ import sys
 import subprocess
 import json
 import re
+import html as _html
 
 # ── Config (from env) ─────────────────────────────────────────────────────────
 HOST = os.getenv("SERVER_HOSTNAME", "localhost")
@@ -135,7 +136,9 @@ def get_recipe_ingredients(recipe_id: int) -> list[str]:
 
 def get_all_recipya_recipe_names() -> dict[str, int]:
     rows = recipya_query("SELECT id, name FROM recipes;")
-    return {r["name"]: r["id"] for r in rows}
+    # Recipya stores names HTML-escaped (e.g. "Penne Al&#39;Arrabbiato");
+    # unescape so a plain "Penne Al'Arrabbiato" note still matches.
+    return {_html.unescape(r["name"]): r["id"] for r in rows}
 
 
 def get_grocy_shopping_list() -> list[dict]:
@@ -303,19 +306,22 @@ def check_5_missing_items_not_in_stock(recipe_entries: list[dict]) -> None:
 
 
 def check_6_tomatoes_not_on_shopping_list(recipe_entries: list[dict]) -> None:
-    """Tomatoes (overstocked) should NOT be on the shopping list."""
+    """Tomatoes (overstocked) should NOT be among the entries added for the recipe.
+
+    Only entries the agent added for this task (i.e. those whose note references
+    a Recipya recipe) are considered — the seed shopping list already contains
+    unrelated tomato-named products, which must not fail this check.
+    """
     try:
-        all_entries = get_grocy_shopping_list()
         tomato_entries = []
-        for e in all_entries:
+        for e in recipe_entries:
             pname = (e.get("product_name") or "").lower()
-            note = (e.get("note") or "").lower()
             if is_tomato_ingredient(pname):
                 tomato_entries.append(e.get("product_name", "unknown"))
 
         check("6. tomatoes_not_on_shopping_list", 1, len(tomato_entries) == 0,
-              f"found tomato products on shopping list: {', '.join(tomato_entries[:3])}"
-              if tomato_entries else "no tomato products on shopping list")
+              f"tomato products added for the recipe: {', '.join(tomato_entries[:3])}"
+              if tomato_entries else "no tomato products among the recipe's shopping entries")
     except Exception as e:
         check("6. tomatoes_not_on_shopping_list", 1, False, f"exception: {e}")
 

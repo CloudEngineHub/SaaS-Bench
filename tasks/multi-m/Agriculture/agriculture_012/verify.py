@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Verifier for agriculture_012: Organic Pinot Noir 2023 — EU wine label compliance + sensory profile
+Verifier for agriculture_012: Organic Chardonnay 2023 — EU wine label compliance
 
 Checks: 11 weighted checks (15 pts total) on e-label (MSSQL).
-Strategy: docker exec sqlcmd for DB, HTTP for label page, llm_judge for sensory.
+Strategy: docker exec sqlcmd for DB, HTTP for label page.
 
 Required env vars:
   SERVER_HOSTNAME, E_LABEL_PORT, E_LABEL_CONTAINER
@@ -25,9 +25,7 @@ for _vn, _vv in [("E_LABEL_PORT", E_LABEL_PORT),
         print(f"FATAL: {_vn} not set", file=sys.stderr)
         sys.exit(1)
 
-DB_CONTAINER = (E_LABEL_CONTAINER.replace("-app", "-db")
-                if "-app" in E_LABEL_CONTAINER
-                else E_LABEL_CONTAINER + "-db")
+DB_CONTAINER = ""
 BASE_URL = f"http://{HOST}:{E_LABEL_PORT}"
 
 # ── Result accumulator ────────────────────────────────────────────────────────
@@ -48,6 +46,28 @@ def docker_exec(container: str, *args: str, timeout: int = 15) -> tuple[int, str
         capture_output=True, text=True, timeout=timeout,
     )
     return r.returncode, r.stdout, r.stderr
+
+
+def _resolve_db_container() -> str:
+    """e-label may run MSSQL inside the app container or in a '-db' sidecar;
+    probe the candidates and use the first one that exists."""
+    candidates = [
+        os.getenv("E_LABEL_DB_CONTAINER", ""),
+        E_LABEL_CONTAINER.replace("-app", "-db") if "-app" in E_LABEL_CONTAINER else "",
+        E_LABEL_CONTAINER + "-db",
+        E_LABEL_CONTAINER,
+    ]
+    for name in [c for c in candidates if c]:
+        try:
+            rc, _, _ = docker_exec(name, "echo", "ok", timeout=5)
+            if rc == 0:
+                return name
+        except Exception:
+            continue
+    return E_LABEL_CONTAINER
+
+
+DB_CONTAINER = _resolve_db_container()
 
 
 def sqlcmd(query: str, timeout: int = 20) -> tuple[int, str, str]:
@@ -118,9 +138,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview",
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                   "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 10},
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -155,7 +175,7 @@ def _find_product():
         "ISNULL(p.Sku, '') "
         "FROM Product p "
         "WHERE p.WineVintage = 2023 "
-        "AND LOWER(p.Name) LIKE '%pinot noir%' "
+        "AND LOWER(p.Name) LIKE '%boutique%chardonnay%' "
         "ORDER BY p.CreatedOn DESC"
     )
     try:
@@ -210,7 +230,7 @@ def _fetch_label_page():
 # ── Individual checks ─────────────────────────────────────────────────────────
 
 def check_1_product_exists():
-    """Product record with Pinot Noir 2023 exists."""
+    """Product record with Boutique Organic Chardonnay 2023 exists."""
     try:
         prod = _find_product()
         if prod:
@@ -218,7 +238,7 @@ def check_1_product_exists():
                   f"name='{prod['name']}', id={prod['id']}")
         else:
             check("1. product_record_found", 1, False,
-                  "no product with WineVintage=2023 and Name containing 'Pinot Noir'")
+                  "no product with WineVintage=2023 and Name containing 'Boutique' + 'Chardonnay'")
     except Exception as e:
         check("1. product_record_found", 1, False, f"exception: {e}")
 
@@ -240,42 +260,43 @@ def check_2_producer_nonempty():
 
 
 def check_3_appellation_nonempty():
-    """Appellation (WineAppellation) must be non-empty."""
+    """Appellation (WineAppellation) must reference Loire."""
     prod = _find_product()
     if not prod:
-        check("3. appellation_nonempty", 1, False, "no product found")
+        check("3. appellation_loire", 1, False, "no product found")
         return
     try:
         val = prod["appellation"]
-        if val and val.upper() != "NULL":
-            check("3. appellation_nonempty", 1, True, f"appellation='{val}'")
+        if val and val.upper() != "NULL" and "loire" in val.lower():
+            check("3. appellation_loire", 1, True, f"appellation='{val}'")
         else:
-            check("3. appellation_nonempty", 1, False, "WineAppellation is empty")
+            check("3. appellation_loire", 1, False,
+                  f"WineAppellation='{val}', expected to contain 'Loire'")
     except Exception as e:
-        check("3. appellation_nonempty", 1, False, f"exception: {e}")
+        check("3. appellation_loire", 1, False, f"exception: {e}")
 
 
 def check_4_alcohol_value():
-    """Alcohol must be approximately 13.5% (13.0-14.0 range)."""
+    """Alcohol must be approximately 12.5% (12.0-13.0 range)."""
     prod = _find_product()
     if not prod:
-        check("4. alcohol_13_5_pct", 2, False, "no product found")
+        check("4. alcohol_12_5_pct", 2, False, "no product found")
         return
     try:
         raw = prod["alcohol"]
         if not raw or raw.upper() == "NULL":
-            check("4. alcohol_13_5_pct", 2, False, "WineAlcohol is null")
+            check("4. alcohol_12_5_pct", 2, False, "WineAlcohol is null")
             return
         val = float(raw)
-        if 13.0 <= val <= 14.0:
-            check("4. alcohol_13_5_pct", 2, True, f"alcohol={val}%")
+        if 12.0 <= val <= 13.0:
+            check("4. alcohol_12_5_pct", 2, True, f"alcohol={val}%")
         else:
-            check("4. alcohol_13_5_pct", 2, False,
-                  f"alcohol={val}%, expected 13.0-14.0")
+            check("4. alcohol_12_5_pct", 2, False,
+                  f"alcohol={val}%, expected 12.0-13.0")
     except ValueError:
-        check("4. alcohol_13_5_pct", 2, False, f"cannot parse: '{raw}'")
+        check("4. alcohol_12_5_pct", 2, False, f"cannot parse: '{raw}'")
     except Exception as e:
-        check("4. alcohol_13_5_pct", 2, False, f"exception: {e}")
+        check("4. alcohol_12_5_pct", 2, False, f"exception: {e}")
 
 
 def check_5_volume_750():
@@ -365,20 +386,20 @@ def check_7_organic_certified():
         check("7. organic_certified", 1, False, f"exception: {e}")
 
 
-def check_8_wine_type_red():
-    """Wine type must be Red (enum value 2) for Pinot Noir."""
+def check_8_wine_type_white():
+    """Wine type must be White (enum value 1) for Chardonnay."""
     prod = _find_product()
     if not prod:
-        check("8. wine_type_red", 1, False, "no product found")
+        check("8. wine_type_white", 1, False, "no product found")
         return
     try:
         val = prod["wine_type"]
-        if val == "2":
-            check("8. wine_type_red", 1, True)
+        if val == "1":
+            check("8. wine_type_white", 1, True)
         else:
-            check("8. wine_type_red", 1, False, f"WineType={val}, expected 2 (Red)")
+            check("8. wine_type_white", 1, False, f"WineType={val}, expected 1 (White)")
     except Exception as e:
-        check("8. wine_type_red", 1, False, f"exception: {e}")
+        check("8. wine_type_white", 1, False, f"exception: {e}")
 
 
 def check_9_label_alcohol_pct_vol():
@@ -401,36 +422,21 @@ def check_9_label_alcohol_pct_vol():
         check("9. alcohol_pct_vol_format", 1, False, f"exception: {e}")
 
 
-def check_10_sensory_fields():
-    """Sensory: serving temp 12-16C, Burgundy glass, >=2 food pairings, tasting notes."""
+def check_10_producer_exact_match():
+    """Producer (FBOName) must match the required value exactly."""
     prod = _find_product()
     if not prod:
-        check("10. sensory_fields_pinot_noir", 2, False, "no product found")
+        check("10. producer_exact_match", 2, False, "no product found")
         return
     try:
-        html = _fetch_label_page()
-        if html is None:
-            check("10. sensory_fields_pinot_noir", 2, False,
-                  "label page not accessible")
-            return
-        text = re.sub(r'<[^>]+>', ' ', html)
-        text = re.sub(r'\s+', ' ', text).strip()
-        if len(text) < 50:
-            check("10. sensory_fields_pinot_noir", 2, False,
-                  "label page has insufficient content")
-            return
-        passed, raw = llm_judge(
-            text[:3000],
-            "The content includes wine serving information for Pinot Noir with ALL of: "
-            "(1) serving temperature in the 12-16 degrees Celsius range, "
-            "(2) glass type referencing Burgundy, "
-            "(3) at least 2 specific food pairing dish names appropriate for Pinot Noir, "
-            "(4) a tasting description mentioning at least one of: aroma, tannin, "
-            "acidity, or finish."
-        )
-        check("10. sensory_fields_pinot_noir", 2, passed, f"llm_judge: {raw}")
+        val = (prod["fbo_name"] or "").strip()
+        if val.lower() == "boutique organic farm":
+            check("10. producer_exact_match", 2, True, f"producer='{val}'")
+        else:
+            check("10. producer_exact_match", 2, False,
+                  f"producer='{val}', expected 'Boutique Organic Farm'")
     except Exception as e:
-        check("10. sensory_fields_pinot_noir", 2, False, f"exception: {e}")
+        check("10. producer_exact_match", 2, False, f"exception: {e}")
 
 
 def check_11_label_page_accessible():
@@ -442,7 +448,7 @@ def check_11_label_page_accessible():
     try:
         html = _fetch_label_page()
         if html is not None:
-            has_wine = ("pinot" in html.lower() or "noir" in html.lower()
+            has_wine = ("chardonnay" in html.lower() or "boutique" in html.lower()
                         or prod["name"].lower().split()[0] in html.lower())
             check("11. label_page_accessible", 2, True,
                   f"contains wine info: {has_wine}")
@@ -464,9 +470,9 @@ def main() -> None:
     check_5_volume_750()
     check_6_allergens_sulphites()
     check_7_organic_certified()
-    check_8_wine_type_red()
+    check_8_wine_type_white()
     check_9_label_alcohol_pct_vol()
-    check_10_sensory_fields()
+    check_10_producer_exact_match()
     check_11_label_page_accessible()
 
     total = sum(w for _, w, _, _ in _checks)

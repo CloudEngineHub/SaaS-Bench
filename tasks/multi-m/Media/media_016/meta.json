@@ -3,6 +3,7 @@
   "category_id": "Media",
   "meta_data": {
     "sites": [
+      "booklore",
       "siyuan"
     ],
     "require_login": true
@@ -11,7 +12,7 @@
     {
       "file": "tasks/multi-m/inputs/siyuan_paper_001.pdf",
       "type": "pdf",
-      "role": "siyuan_asset"
+      "role": "booklore_asset"
     }
   ]
 }
