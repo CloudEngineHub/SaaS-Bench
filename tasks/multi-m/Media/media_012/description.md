@@ -7,7 +7,7 @@ Unacceptable: "Great film, exciting action scenes, good chemistry between leads.
 Acceptable: "Ritchie casts Moriarty as a charismatic, sensory genius — a direct embodiment of danger, contrasting Doyle's original choice to keep him nearly off-page and threatening through inference and others' testimony."
 
 Step 2 — Booklore reading notes on The Valley of Fear:
-In Booklore, find the book "The Valley of Fear" by Arthur Conan Doyle. If not present, add it manually (Author: Arthur Conan Doyle, Genre: Detective Fiction, Status: Read). Add reading notes listing at least **5 specific differences** between the novel and the film. The 5 differences must span **at least 3 distinct dimensions** from the following list:
+In Booklore, find the book "The Valley of Fear" by Arthur Conan Doyle (it is in the library, on the Victorian Classics shelf). Set its reading status to **Read**. Add reading notes listing at least **5 specific differences** between the novel and the film. The 5 differences must span **at least 3 distinct dimensions** from the following list:
 - Moriarty's characterisation (presence, representation method, screen/page time)
 - Mystery/detective structure (plot architecture, reveal mechanism)
 - Historical period and setting (Victorian authenticity vs. Edwardian/steampunk style)

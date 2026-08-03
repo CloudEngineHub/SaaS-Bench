@@ -98,28 +98,20 @@ _product: dict = {}
 
 def _load_product() -> bool:
     global _product
+    # Target only the exact product this task requires (name 'Estate Pinot
+    # Noir'); the seed DB ships near-miss decoys such as 'Pinot Noir Provence
+    # 2024', 'Fairview Estate Pinot Meunier 2022' and 'Heatherwood Estate
+    # Pinot Noir 2023', so a loose match would lock onto a pre-existing record.
     query = (
         "SELECT TOP 1 "
         "  Name, FBOName, WineVintage, WineAppellation, WineAlcohol, Volume, "
         "  CAST(Id AS NVARCHAR(36)), Brand, WineType "
         "FROM Product "
-        "WHERE ("
-        "  Name LIKE '%Pinot Noir%' OR Name LIKE '%Estate Pinot%' "
-        "  OR Brand LIKE '%Pinot Noir%' OR Brand LIKE '%Estate Pinot%' "
-        "  OR FBOName LIKE '%Boutique Organic%' "
-        ") "
+        "WHERE LOWER(LTRIM(RTRIM(Name))) = 'estate pinot noir' "
         "ORDER BY CreatedOn DESC"
     )
     rc, stdout, _ = sqlcmd(query)
     rows = _parse_sqlcmd_rows(stdout) if rc == 0 else []
-    if not rows:
-        rc2, stdout2, _ = sqlcmd(
-            "SELECT TOP 1 "
-            "  Name, FBOName, WineVintage, WineAppellation, WineAlcohol, Volume, "
-            "  CAST(Id AS NVARCHAR(36)), Brand, WineType "
-            "FROM Product ORDER BY CreatedOn DESC"
-        )
-        rows = _parse_sqlcmd_rows(stdout2) if rc2 == 0 else []
     if rows and len(rows[0]) >= 7:
         r = rows[0]
         _product.update({

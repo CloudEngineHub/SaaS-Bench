@@ -1,5 +1,5 @@
 **Task Requirements:**
-Identify the film from the provided movie poster image (movie_1.jpg). Describe the specific visual elements (title typography, character costumes, visual effects) that confirm its identity. Search for this film in Watcharr, mark it as watched, rate it 7/10, and write an analytical short review (50–100 words in English) focusing on the cinematography or narrative structure (not generic praise). Finally, create a SiYuan document titled 'EP-Quick: Modern Mythmaking' with a brief intro (≥100 chars) and a bidirectional link to a 'Director Profile - Jon Watts' document (create it if absent).
+Identify the film from the provided movie poster image (watcharr_poster_001.jpg). Describe the specific visual elements (title typography, character costumes, visual effects) that confirm its identity. Search for this film in Watcharr, mark it as watched, rate it 7/10, and write an analytical short review (50–100 words in English) focusing on the cinematography or narrative structure (not generic praise). Finally, create a SiYuan document titled 'EP-Quick: Modern Mythmaking' with a brief intro (≥100 chars) and a bidirectional link to a 'Director Profile - Jon Watts' document (create it if absent).
 
 **Steps:**
 1. Visually identify the film from the provided poster image, noting specific textual and visual cues.
@@ -14,8 +14,6 @@ Identify the film from the provided movie poster image (movie_1.jpg). Describe t
   - Source app: watcharr
   - Metadata:
     - asset_type: movie_poster
-    - title: Spider-Man: No Way Home
-    - tmdb_id: 1
 
 **Login Credentials:**
 

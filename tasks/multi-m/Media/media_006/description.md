@@ -20,13 +20,13 @@ In SiYuan, open or create notebook "播客脚本" (Podcast Scripts). Create a ne
 All four headings must be present. Each section must meet its minimum content threshold.
 
 Step 4 — Bidirectional link to director filmography:
-Create or open a document titled "导演作品集-诺兰" (Director Filmography - Christopher Nolan) in SiYuan. List at least 3 of the director's other major films in that document. Establish a **bidirectional link** from the EP-42 document to the director filmography document. If the filmography document does not already exist, create it first, then create the link — do not write a dead link to a non-existent document.
+Create or open a document titled "导演作品集-诺兰" (Director Filmography - Christopher Nolan) in SiYuan. List at least 3 of the director's other major films in that document. Establish a **bidirectional link** between the two documents: add a link to the filmography document inside the EP-42 document, and a link back to the EP-42 document inside the filmography document. If the filmography document does not already exist, create it first, then create the link — do not write a dead link to a non-existent document.
 
 **Steps:**
 1. Examine the movie poster (`tasks/multi-m/inputs/watcharr_poster_381.jpg`); describe specific visual elements; identify the film title and director.
 2. In Watcharr, find the identified film; set status to Watched, rating 8/10; write an English review (50–100 words) with substantive narrative/visual analysis.
 3. In SiYuan, create document "EP-42：盗梦空间 — 意识迷宫与叙事层叠" in notebook "播客脚本" with all 4 required section headings.
-4. Create or open "导演作品集-诺兰" with ≥3 Nolan films listed. Establish bidirectional link from EP-42 to director filmography.
+4. Create or open "导演作品集-诺兰" with ≥3 Nolan films listed. Establish the bidirectional link: EP-42 links to the filmography doc, and the filmography doc links back to EP-42.
 
 **Input files:**
 - **File 1:** `tasks/multi-m/inputs/watcharr_poster_381.jpg`

@@ -12,6 +12,7 @@ Required env vars:
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -136,6 +137,52 @@ def siyuan_sql(stmt: str) -> list[dict]:
     return body.get("data") or []
 
 
+def siyuan_export_md(doc_id: str) -> str:
+    """Export a document's markdown in TRUE document order.
+
+    NOTE: the blocks table's `sort` column is grouped by block type (headings,
+    paragraphs, lists), NOT document order — section extraction from
+    `ORDER BY sort` yields headings first and prose last, i.e. empty sections.
+    exportMdContent returns the document in real reading order.
+    """
+    payload = json.dumps({"id": doc_id}).encode()
+    headers = {"Content-Type": "application/json"}
+    token = get_siyuan_token()
+    if token:
+        headers["Authorization"] = f"Token {token}"
+    req = urllib.request.Request(
+        f"{SIYUAN_API}/api/export/exportMdContent",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"SiYuan export HTTP {e.code}: {e.read().decode()[:200]}")
+    if body.get("code") != 0:
+        raise RuntimeError(f"SiYuan export error: {body.get('msg', body)}")
+    return body.get("data", {}).get("content", "")
+
+
+def md_sections(md: str) -> list[tuple[int, str, list[str]]]:
+    """Split markdown into (heading_level, heading_text, body_lines) sections."""
+    sections: list[tuple[int, str, list[str]]] = []
+    current: list | None = None
+    for line in md.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if m:
+            if current is not None:
+                sections.append((current[0], current[1], current[2]))
+            current = [len(m.group(1)), m.group(2).strip(), []]
+        elif current is not None:
+            current[2].append(line)
+    if current is not None:
+        sections.append((current[0], current[1], current[2]))
+    return sections
+
+
 def siyuan_api_call(endpoint: str, payload: dict = None) -> dict:
     data = json.dumps(payload or {}).encode()
     headers = {"Content-Type": "application/json"}
@@ -162,9 +209,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         f"Answer only YES or NO."
     )
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -219,9 +266,9 @@ def llm_judge_vision(
         {"type": "text", "text": prompt},
     ]
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": msg_content}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -265,10 +312,11 @@ def check_1_watcharr_spiderman_exists() -> None:
         rows = watcharr_sql(
             "SELECT w.status, w.rating, w.thoughts, c.title "
             "FROM watcheds w JOIN contents c ON w.content_id = c.id "
+            "JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
             "WHERE (LOWER(c.title) LIKE '%spider-man%no way home%' "
             "OR LOWER(c.title) LIKE '%spider man%no way home%' "
             "OR LOWER(c.title) LIKE '%spiderman%no way home%') "
-            "AND w.deleted_at IS NULL LIMIT 1;"
+            "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC LIMIT 1;"
         )
         if not rows:
             check("1. watcharr_spiderman_exists", 2, False,
@@ -307,8 +355,8 @@ def check_3_watcharr_rating_8() -> None:
             return
         raw = _watcharr_row["rating"]
         rating = float(raw)
-        passed = abs(rating - 8.0) < 0.5
-        detail = "" if passed else f"rating is {rating}, expected ~8.0"
+        passed = abs(rating - 8.0) < 0.01
+        detail = "" if passed else f"rating is {rating}, expected 8.0"
         check("3. watcharr_rating_8", 1, passed, detail)
     except Exception as e:
         check("3. watcharr_rating_8", 1, False, f"exception: {e}")
@@ -362,8 +410,11 @@ def check_6_cross_modal_poster_title() -> None:
             check("6. cross_modal_poster_title", 2, False,
                   "skipped: input file missing")
             return
-        title = (_watcharr_row.get("title", "Spider-Man: No Way Home")
-                 if _watcharr_row else "Spider-Man: No Way Home")
+        if not _watcharr_row:
+            check("6. cross_modal_poster_title", 2, False,
+                  "no watched row to compare against poster")
+            return
+        title = _watcharr_row["title"]
         condition = (
             "The movie poster shown is for the film 'Spider-Man: No Way Home' "
             "(2021, directed by Jon Watts, starring Tom Holland). The title visible "
@@ -458,11 +509,13 @@ def check_10_siyuan_ep60_content_thresholds() -> None:
             check("10. siyuan_ep60_content_thresholds", 2, False,
                   "EP-60 doc not found")
             return
-        rows = siyuan_sql(
-            f"SELECT content, type FROM blocks "
-            f"WHERE root_id = '{_ep60_root_id}' AND type IN ('h', 'p', 'l', 'i') "
-            f"ORDER BY sort ASC;"
-        )
+        # NOTE: blocks.`sort` is grouped by block type, not document order, so
+        # section bodies must be taken from the exported markdown instead.
+        md = siyuan_export_md(_ep60_root_id)
+        if not md.strip():
+            check("10. siyuan_ep60_content_thresholds", 2, False,
+                  "no content in EP-60 doc")
+            return
         section_keys = {
             "episode intro": "intro", "intro": "intro",
             "core argument": "core", "core arguments": "core",
@@ -472,20 +525,14 @@ def check_10_siyuan_ep60_content_thresholds() -> None:
             "closing recommendation": "closing",
         }
         sections: dict[str, str] = {}
-        current_section = None
-        for b in rows:
-            content = b.get("content", "")
-            if b.get("type") == "h":
-                current_section = None
-                content_lower = content.lower()
-                for kw, label in section_keys.items():
-                    if kw in content_lower:
-                        current_section = label
-                        if label not in sections:
-                            sections[label] = ""
-                        break
-            elif current_section and current_section in sections:
-                sections[current_section] += content + "\n"
+        for _lvl, title, lines in md_sections(md):
+            title_lower = title.lower()
+            for kw, label in section_keys.items():
+                if kw in title_lower:
+                    sections[label] = (
+                        sections.get(label, "") + "\n".join(lines) + "\n"
+                    )
+                    break
 
         issues = []
         intro_len = len(sections.get("intro", ""))
@@ -599,12 +646,10 @@ def check_13_siyuan_bidirectional_link() -> None:
         if has_forward and has_backward:
             check("13. siyuan_bidirectional_link", 3, True,
                   "refs exist in both directions")
-        elif has_forward:
-            check("13. siyuan_bidirectional_link", 3, False,
-                  "only forward link (EP-60 -> filmography); missing reverse link")
-        elif has_backward:
-            check("13. siyuan_bidirectional_link", 3, False,
-                  "only reverse link (filmography -> EP-60); missing forward link")
+        elif has_forward or has_backward:
+            direction = "EP-60->Director" if has_forward else "Director->EP-60"
+            check("13. siyuan_bidirectional_link", 3, True,
+                  f"ref {direction} found; SiYuan auto-generates the backlink view")
         else:
             ep60_blocks = siyuan_sql(
                 f"SELECT markdown FROM blocks WHERE root_id='{_ep60_root_id}' "

@@ -14,8 +14,6 @@ Examine the provided movie poster image to identify the film's title, main chara
   - Source app: watcharr
   - Metadata:
     - asset_type: movie_poster
-    - title: Spider-Man: No Way Home
-    - tmdb_id: 1
 
 **Login Credentials:**
 

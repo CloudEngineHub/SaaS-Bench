@@ -1,5 +1,6 @@
 """
-Verifier for agriculture_020: Ratatouille ingredient cross-check — Recipya recipe → Grocy stock → shopping list
+Verifier for agriculture_020: Layered Zucchini Casserole ingredient cross-check —
+Recipya recipe → Grocy stock → shopping list
 
 Checks: 8 weighted checks (14 pts total) across recipya, grocy.
 Strategy: docker exec sqlite3 for Recipya; docker exec php PDO for Grocy;
@@ -35,10 +36,12 @@ for var_name, var_val in [
 GROCY_DB = "/config/data/grocy.db"
 RECIPYA_DB = "/root/.config/Recipya/Database/recipya.db"
 
-RATATOUILLE_VEGETABLES = [
+RECIPE_NAME = "Layered Zucchini Casserole"
+
+RECIPE_VEGETABLES = [
     "aubergine", "eggplant", "courgette", "zucchini",
     "bell pepper", "pepper", "capsicum",
-    "tomato", "onion", "garlic",
+    "tomato", "onion", "garlic", "mushroom",
 ]
 
 # ── Result accumulator ────────────────────────────────────────────────────────
@@ -122,9 +125,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
     )
     try:
         payload = json.dumps({
-            "model": "gemini-3.0-flash-preview",
+            "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 10,
+            "max_tokens": 512,
         }).encode()
         req = urllib.request.Request(
             f"{api_base}/chat/completions",
@@ -142,7 +145,7 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
 
 def _is_veggie_keyword(name: str) -> bool:
     name_lower = name.lower()
-    return any(v in name_lower for v in RATATOUILLE_VEGETABLES)
+    return any(v in name_lower for v in RECIPE_VEGETABLES)
 
 
 # ── Shared state ──────────────────────────────────────────────────────────────
@@ -154,46 +157,31 @@ _bistrot_shopping_items: list[dict] = []
 
 # ── Individual checks ─────────────────────────────────────────────────────────
 
-def check_1_recipya_ratatouille_exists() -> None:
-    """A recipe matching 'ratatouille' exists in Recipya."""
+def check_1_recipya_recipe_exists() -> None:
+    """The 'Layered Zucchini Casserole' recipe exists in Recipya."""
     global _recipya_recipe_id, _recipya_recipe_name
     try:
         rows = recipya_query(
             "SELECT r.id, r.name FROM recipes r "
             "JOIN user_recipe ur ON ur.recipe_id = r.id "
-            "WHERE LOWER(r.name) LIKE '%ratatouille%' "
+            "WHERE LOWER(TRIM(r.name)) = 'layered zucchini casserole' "
             "ORDER BY r.id DESC LIMIT 1;"
         )
         if rows:
             _recipya_recipe_id = int(rows[0]["id"])
             _recipya_recipe_name = rows[0]["name"]
-            check("1. recipya_ratatouille_exists", 2, True,
+            check("1. recipya_recipe_exists", 2, True,
                   f"id={_recipya_recipe_id} name='{_recipya_recipe_name}'")
             return
 
-        rows = recipya_query(
-            "SELECT r.id, r.name FROM recipes r "
-            "JOIN user_recipe ur ON ur.recipe_id = r.id "
-            "ORDER BY r.id DESC;"
-        )
-        for row in rows:
-            name_lower = row["name"].lower()
-            if any(kw in name_lower for kw in ["ratatouille", "provenc", "vegetable stew"]):
-                _recipya_recipe_id = int(row["id"])
-                _recipya_recipe_name = row["name"]
-                check("1. recipya_ratatouille_exists", 2, True,
-                      f"id={_recipya_recipe_id} name='{_recipya_recipe_name}'")
-                return
-
-        names = [r["name"] for r in rows[:5]]
-        check("1. recipya_ratatouille_exists", 2, False,
-              f"no ratatouille recipe found; recent: {names}")
+        check("1. recipya_recipe_exists", 2, False,
+              f"recipe '{RECIPE_NAME}' not found in recipya")
     except Exception as e:
-        check("1. recipya_ratatouille_exists", 2, False, f"exception: {e}")
+        check("1. recipya_recipe_exists", 2, False, f"exception: {e}")
 
 
 def check_2_recipya_vegetable_ingredients() -> None:
-    """The Recipya ratatouille recipe has >=3 vegetable ingredients."""
+    """The Recipya casserole recipe has >=3 vegetable ingredients."""
     global _recipya_ingredients
     try:
         if _recipya_recipe_id < 0:
@@ -270,7 +258,7 @@ def check_4_bistrot_note_exact_text() -> None:
 
 
 def check_5_shopping_items_are_vegetables() -> None:
-    """The bistrot shopping list items are vegetable ingredients consistent with ratatouille."""
+    """The bistrot shopping list items are vegetable ingredients consistent with the casserole recipe."""
     try:
         if not _bistrot_shopping_items:
             check("5. shopping_items_are_vegetables", 2, False, "no bistrot items from check 3")
@@ -285,7 +273,7 @@ def check_5_shopping_items_are_vegetables() -> None:
         total = len(item_names)
         passed = veggie_count >= 1 and veggie_count >= total * 0.5
         check("5. shopping_items_are_vegetables", 2, passed,
-              f"{veggie_count}/{total} items are ratatouille vegetables: "
+              f"{veggie_count}/{total} items are casserole vegetables: "
               f"{', '.join(item_names[:6])}")
     except Exception as e:
         check("5. shopping_items_are_vegetables", 2, False, f"exception: {e}")
@@ -393,7 +381,7 @@ def check_8_cross_app_ingredients_match() -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
-    check_1_recipya_ratatouille_exists()
+    check_1_recipya_recipe_exists()
     check_2_recipya_vegetable_ingredients()
     check_3_grocy_shopping_list_has_bistrot_items()
     check_4_bistrot_note_exact_text()

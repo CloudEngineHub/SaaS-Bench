@@ -10,7 +10,7 @@
   },
   "multimodal_input": [
     {
-      "file": "tasks/multi-m/inputs/watcharr_poster_007.jpg",
+      "file": "tasks/multi-m/inputs/watcharr_poster_386.jpg",
       "type": "image",
       "role": "watcharr_asset"
     }

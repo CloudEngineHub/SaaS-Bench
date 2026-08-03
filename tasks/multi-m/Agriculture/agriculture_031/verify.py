@@ -1,9 +1,11 @@
 """
-Verifier for agriculture_031: Chef dish photo → Recipya recipe lookup → Grocy stock check →
-FarmOS harvest OMRI cert → update Grocy product description.
+Verifier for agriculture_031: Chef dish photo → Recipya recipe lookup/create →
+Grocy product+stock → FarmOS harvest log OMRI annotation → update Grocy product
+description.
 
 Checks: 10 weighted checks across recipya, grocy, farmos.
-Strategy: docker exec (recipya SQLite, grocy SQLite), farmos REST API, llm_judge_vision.
+Strategy: host-side SQLite via docker cp (recipya, grocy), authenticated FarmOS
+JSON:API session (web login; anonymous access sees no log data), llm_judge_vision.
 
 Required env vars:
   SERVER_HOSTNAME, RECIPYA_PORT, RECIPYA_CONTAINER,
@@ -15,8 +17,10 @@ import base64
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
+import tempfile
 
 import requests
 
@@ -67,23 +71,103 @@ def docker_exec(container: str, *args: str, timeout: int = 15) -> tuple[int, str
     return r.returncode, r.stdout, r.stderr
 
 
+def _sqlite_via_docker_cp(
+    container: str, db_path: str, query: str, timeout: int = 20
+) -> str:
+    """Query a SQLite DB inside a container that has no sqlite3 CLI.
+
+    Copies the DB file (plus -wal/-shm when present) to a host temp dir via
+    ``docker cp`` and runs the query with the host Python's sqlite3 module.
+    Output mimics ``sqlite3 -separator "|"``: columns joined by "|", NULL as
+    empty string, one row per line, no header.
+    """
+    with tempfile.TemporaryDirectory(prefix="verify_sqlite_") as tmpdir:
+        local_db = os.path.join(tmpdir, os.path.basename(db_path))
+        r = subprocess.run(
+            ["docker", "cp", f"{container}:{db_path}", local_db],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"docker cp {container}:{db_path} failed: {r.stderr.strip()}"
+            )
+        # Best effort: copy WAL/SHM so un-checkpointed data is visible too.
+        for suffix in ("-wal", "-shm"):
+            subprocess.run(
+                ["docker", "cp", f"{container}:{db_path}{suffix}", local_db + suffix],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        try:
+            conn = sqlite3.connect(local_db)
+            try:
+                rows = conn.execute(query).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            raise RuntimeError(f"sqlite3 query on {db_path} failed: {e}")
+    lines = []
+    for row in rows:
+        lines.append("|".join(
+            "" if v is None
+            else v.decode("utf-8", "replace") if isinstance(v, bytes)
+            else str(v)
+            for v in row
+        ))
+    return "\n".join(lines).strip()
+
+
 def recipya_sql(query: str) -> str:
-    rc, out, err = docker_exec(RECIPYA_CONTAINER, "sqlite3", "-separator", "|", RECIPYA_DB, query)
-    if rc != 0:
-        raise RuntimeError(f"recipya sql error: {err.strip()}")
-    return out.strip()
+    try:
+        return _sqlite_via_docker_cp(RECIPYA_CONTAINER, RECIPYA_DB, query)
+    except Exception as e:
+        raise RuntimeError(f"recipya sql error: {e}")
 
 
 def grocy_sql(query: str) -> str:
-    rc, out, err = docker_exec(GROCY_CONTAINER, "sqlite3", "-separator", "|", GROCY_DB, query)
-    if rc != 0:
-        raise RuntimeError(f"grocy sql error: {err.strip()}")
-    return out.strip()
+    try:
+        return _sqlite_via_docker_cp(GROCY_CONTAINER, GROCY_DB, query)
+    except Exception as e:
+        raise RuntimeError(f"grocy sql error: {e}")
+
+
+def _farmos_session() -> "requests.Session":
+    """Authenticated FarmOS session.
+
+    FarmOS JSON:API hides log/asset data from anonymous and HTTP-basic
+    requests, so authenticate through the web-login form and reuse the
+    resulting session cookie.
+    """
+    global _FARMOS_SESSION
+    if _FARMOS_SESSION is not None:
+        return _FARMOS_SESSION
+    s = requests.Session()
+    base = f"http://{HOST}:{FARMOS_PORT}"
+    try:
+        login_page = s.get(f"{base}/user/login", timeout=15)
+        m = re.search(r'name="form_build_id" value="([^"]+)"', login_page.text)
+        s.post(
+            f"{base}/user/login",
+            data={
+                "name": os.getenv("FARMOS_USER", "admin"),
+                "pass": os.getenv("FARMOS_PASS", "admin123456"),
+                "form_build_id": m.group(1) if m else "",
+                "form_id": "user_login_form",
+                "op": "Log in",
+            },
+            timeout=15,
+        )
+    except Exception:
+        pass
+    _FARMOS_SESSION = s
+    return s
+
+
+_FARMOS_SESSION: "requests.Session | None" = None
 
 
 def farmos_api_get(path: str) -> dict:
     url = f"http://{HOST}:{FARMOS_PORT}{path}"
-    resp = requests.get(url, timeout=15)
+    resp = _farmos_session().get(url, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
@@ -101,9 +185,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         resp = requests.post(
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview",
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                   "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 10},
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -143,7 +227,7 @@ def llm_judge_vision(
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json={
-                "model": "gemini-3.0-flash-preview",
+                "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -152,7 +236,7 @@ def llm_judge_vision(
                         {"type": "text", "text": prompt},
                     ],
                 }],
-                "max_tokens": 10,
+                "max_tokens": 512,
             },
             timeout=timeout,
         )
@@ -174,27 +258,23 @@ def check_0_input_files_exist() -> None:
 
 
 def check_1_recipe_exists_in_recipya() -> str | None:
-    """A recipe related to the dish photo (beef and broccoli stir-fry) must exist in Recipya."""
+    """The recipe 'Beef and Broccoli Stir-Fry' (created per the task) must exist in Recipya."""
     try:
         rows = recipya_sql(
             "SELECT id, name FROM recipes "
-            "WHERE LOWER(name) LIKE '%broccoli%' AND "
-            "(LOWER(name) LIKE '%beef%' OR LOWER(name) LIKE '%stir%');"
+            "WHERE LOWER(TRIM(name)) = 'beef and broccoli stir-fry';"
         )
         if rows:
             first = rows.split("\n")[0]
             rid, rname = first.split("|", 1)
             check("1. recipe_exists_in_recipya", 2, True, f"id={rid} name={rname}")
             return rid
-        all_broccoli = recipya_sql("SELECT id, name FROM recipes WHERE LOWER(name) LIKE '%broccoli%';")
-        if all_broccoli:
-            first = all_broccoli.split("\n")[0]
-            rid, rname = first.split("|", 1)
-            check("1. recipe_exists_in_recipya", 2, True,
-                  f"broccoli recipe found: id={rid} name={rname}")
-            return rid
+        near = recipya_sql(
+            "SELECT id, name FROM recipes WHERE LOWER(name) LIKE '%broccoli%';"
+        )
         check("1. recipe_exists_in_recipya", 2, False,
-              "no recipe matching beef/broccoli/stir-fry found")
+              "recipe 'Beef and Broccoli Stir-Fry' not found"
+              + (f"; other broccoli recipes: {near.split(chr(10))[:3]}" if near else ""))
         return None
     except Exception as e:
         check("1. recipe_exists_in_recipya", 2, False, f"exception: {e}")
@@ -251,10 +331,10 @@ def check_3_broccoli_ingredient_in_recipe(recipe_id: str | None) -> None:
 
 
 def check_4_broccoli_product_in_grocy() -> str | None:
-    """A broccoli product must exist in Grocy."""
+    """The product named exactly 'Broccoli' (created per the task) must exist in Grocy."""
     try:
         rows = grocy_sql(
-            "SELECT id, name FROM products WHERE LOWER(name) LIKE '%broccoli%';"
+            "SELECT id, name FROM products WHERE LOWER(TRIM(name)) = 'broccoli';"
         )
         if rows:
             first = rows.split("\n")[0]
@@ -262,7 +342,7 @@ def check_4_broccoli_product_in_grocy() -> str | None:
             check("4. broccoli_product_in_grocy", 1, True, f"id={pid} name={pname}")
             return pid
         check("4. broccoli_product_in_grocy", 1, False,
-              "no broccoli product found in grocy")
+              "no product named exactly 'Broccoli' found in grocy")
         return None
     except Exception as e:
         check("4. broccoli_product_in_grocy", 1, False, f"exception: {e}")
@@ -289,8 +369,12 @@ def check_5_broccoli_in_grocy_stock(product_id: str | None) -> None:
         check("5. broccoli_in_grocy_stock", 1, False, f"exception: {e}")
 
 
+TARGET_LOG_NAME = "2024 broccoli harvest — north field east bed (side shoots)"
+EXPECTED_OMRI = "OMRI-ORG-2024-1187"
+
+
 def check_6_farmos_harvest_log_exists() -> dict | None:
-    """A harvest log for broccoli must exist in FarmOS."""
+    """The broccoli harvest log named in the task must exist in FarmOS."""
     try:
         data = farmos_api_get("/api/log/harvest")
         logs = data.get("data", [])
@@ -307,11 +391,19 @@ def check_6_farmos_harvest_log_exists() -> dict | None:
             if "broccoli" in name or "broccoli" in notes_val:
                 broccoli_logs.append(log)
         if broccoli_logs:
-            broccoli_logs.sort(
-                key=lambda x: x.get("attributes", {}).get("timestamp", ""),
-                reverse=True,
-            )
-            latest = broccoli_logs[0]
+            named = [
+                log for log in broccoli_logs
+                if (log.get("attributes", {}).get("name") or "").strip().lower()
+                == TARGET_LOG_NAME
+            ]
+            if named:
+                latest = named[0]
+            else:
+                broccoli_logs.sort(
+                    key=lambda x: x.get("attributes", {}).get("timestamp", ""),
+                    reverse=True,
+                )
+                latest = broccoli_logs[0]
             log_name = latest.get("attributes", {}).get("name", "?")
             check("6. farmos_harvest_log_exists", 2, True,
                   f"found: {log_name}")
@@ -325,7 +417,8 @@ def check_6_farmos_harvest_log_exists() -> dict | None:
 
 
 def check_7_farmos_omri_cert_in_log(harvest_log: dict | None) -> str | None:
-    """The FarmOS harvest log must contain an OMRI certification number."""
+    """The FarmOS harvest log notes must contain the OMRI certification
+    number given in the task (OMRI-ORG-2024-1187)."""
     if not harvest_log:
         check("7. farmos_omri_cert_number", 2, False,
               "skipped: no harvest log found")
@@ -340,19 +433,12 @@ def check_7_farmos_omri_cert_in_log(harvest_log: dict | None) -> str | None:
             notes_text = notes
         name = attrs.get("name") or ""
         search_text = f"{name} {notes_text}"
-        omri_match = re.search(r'OMRI[\s\-#:]*([A-Za-z0-9\-]+)', search_text, re.IGNORECASE)
-        if omri_match:
-            cert = omri_match.group(0).strip()
-            check("7. farmos_omri_cert_number", 2, True, f"OMRI cert: {cert}")
-            return cert
-        omri_match2 = re.search(r'([A-Z]{2,4}[\-]?\d{3,6}[\-]?\d{0,4})', search_text)
-        if omri_match2 and ("omri" in search_text.lower() or "cert" in search_text.lower()):
-            cert = omri_match2.group(1).strip()
+        if EXPECTED_OMRI in search_text:
             check("7. farmos_omri_cert_number", 2, True,
-                  f"probable OMRI cert: {cert}")
-            return cert
+                  f"OMRI cert: {EXPECTED_OMRI}")
+            return EXPECTED_OMRI
         check("7. farmos_omri_cert_number", 2, False,
-              f"no OMRI cert pattern found in log notes (first 200 chars: {search_text[:200]})")
+              f"{EXPECTED_OMRI} not found in log notes (first 200 chars: {search_text[:200]})")
         return None
     except Exception as e:
         check("7. farmos_omri_cert_number", 2, False, f"exception: {e}")

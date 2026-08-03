@@ -2,7 +2,7 @@
 Verifier for media_012: Cross-media comparative analysis — The Valley of Fear vs A Game of Shadows
 
 Checks: 11 weighted checks across watcharr, booklore, siyuan.
-Strategy: docker exec SQLite (watcharr), docker exec MariaDB (booklore), REST API (siyuan), llm_judge (content quality).
+Strategy: host-side SQLite via docker cp (watcharr), docker exec MariaDB (booklore), REST API (siyuan), llm_judge (content quality).
 
 Required env vars:
   SERVER_HOSTNAME, WATCHARR_PORT, WATCHARR_CONTAINER,
@@ -43,7 +43,7 @@ if _missing:
     print(f"FATAL: {', '.join(_missing)} not set", file=sys.stderr)
     sys.exit(1)
 
-BOOKLORE_DB_CONTAINER = os.getenv("BOOKLORE_DB_CONTAINER", BOOKLORE_CONTAINER + "-db")
+BOOKLORE_DB_CONTAINER = os.getenv("BOOKLORE_DB_CONTAINER") or BOOKLORE_CONTAINER
 
 # ── Result accumulator ────────────────────────────────────────────────────────
 _checks: list[tuple[str, int, bool, str]] = []
@@ -93,23 +93,39 @@ def _find_watcharr_db() -> str:
 
 
 def watcharr_sql(sql: str, timeout: int = 15) -> tuple[int, str, str]:
+    """Query Watcharr's SQLite DB.
+
+    The mw-watcharr image ships no sqlite3 CLI and the container has no
+    outbound network to install one, so docker cp the DB (plus WAL sidecars)
+    to a host temp dir and query it with Python's sqlite3 module. Output
+    mimics `sqlite3 -separator "\t"`.
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+
     db = _find_watcharr_db()
-    rc, out, err = docker_exec(
-        WATCHARR_CONTAINER, "sqlite3", "-separator", "\t", db, sql,
-        timeout=timeout,
-    )
-    if rc != 0 and ("not found" in err.lower() or "executable file" in err.lower()):
-        docker_exec(
-            WATCHARR_CONTAINER, "sh", "-c",
-            "apk add --no-cache sqlite 2>/dev/null || "
-            "(apt-get update -qq && apt-get install -y -qq sqlite3) 2>/dev/null",
-            timeout=60,
-        )
-        rc, out, err = docker_exec(
-            WATCHARR_CONTAINER, "sqlite3", "-separator", "\t", db, sql,
-            timeout=timeout,
-        )
-    return rc, out, err
+    tmpdir = tempfile.mkdtemp(prefix="watcharr_verify_")
+    try:
+        local_db = os.path.join(tmpdir, os.path.basename(db))
+        r = subprocess.run(["docker", "cp", f"{WATCHARR_CONTAINER}:{db}", local_db],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            return r.returncode, "", r.stderr
+        for suffix in ("-wal", "-shm"):
+            subprocess.run(["docker", "cp", f"{WATCHARR_CONTAINER}:{db}{suffix}", tmpdir],
+                           capture_output=True, text=True, timeout=timeout)
+        con = sqlite3.connect(local_db)
+        try:
+            rows = con.execute(sql).fetchall()
+        finally:
+            con.close()
+        out = "\n".join("\t".join("" if v is None else str(v) for v in row) for row in rows)
+        return 0, (out + "\n") if out else "", ""
+    except Exception as e:
+        return 1, "", str(e)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ── Booklore helpers (MariaDB via docker exec) ──────────────────────────────
@@ -187,6 +203,37 @@ def siyuan_sql(stmt: str) -> list:
     return []
 
 
+def siyuan_export_md(doc_id: str) -> str:
+    """Export a document's markdown in TRUE document order.
+
+    NOTE: the blocks table's `sort` column is grouped by block type (headings,
+    paragraphs, lists), NOT document order — section extraction from
+    `ORDER BY sort` yields headings first and prose last, i.e. empty sections.
+    exportMdContent returns the document in real reading order.
+    """
+    data = siyuan_api("/api/export/exportMdContent", {"id": doc_id})
+    if isinstance(data, dict):
+        return data.get("content", "") or ""
+    return ""
+
+
+def md_sections(md: str) -> list[tuple[int, str, list[str]]]:
+    """Split markdown into (heading_level, heading_text, body_lines) sections."""
+    sections: list[tuple[int, str, list[str]]] = []
+    current: list | None = None
+    for line in md.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if m:
+            if current is not None:
+                sections.append((current[0], current[1], current[2]))
+            current = [len(m.group(1)), m.group(2).strip(), []]
+        elif current is not None:
+            current[2].append(line)
+    if current is not None:
+        sections.append((current[0], current[1], current[2]))
+    return sections
+
+
 # ── LLM judge helper ────────────────────────────────────────────────────────
 def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, str]:
     api_base = os.getenv("MINDRA_BASE_URL", "https://api.mindracode.com/v1")
@@ -204,9 +251,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
             f"{api_base}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
-            json={"model": "gemini-3.0-flash-preview",
+            json={"model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
                   "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 10},
+                  "max_tokens": 512},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -234,10 +281,11 @@ def check_1_watcharr_film_exists() -> None:
             "SELECT c.id, c.title, w.status, w.rating, w.thoughts "
             "FROM contents c "
             "JOIN watcheds w ON w.content_id = c.id "
-            "WHERE c.type = 'movie' "
+            "JOIN users u ON w.user_id = u.id "
+            "WHERE c.type = 'movie' AND u.username = 'admin' "
             "AND (c.title LIKE '%Game of Shadows%' OR c.title LIKE '%game of shadows%') "
             "AND w.deleted_at IS NULL "
-            "LIMIT 1;"
+            "ORDER BY w.updated_at DESC LIMIT 1;"
         )
         if rc != 0:
             check("1. Watcharr: film found", 1, False, f"sqlite error: {err.strip()[:200]}")
@@ -458,17 +506,10 @@ def check_8_siyuan_four_sections() -> None:
               "skipped: doc not found")
         return
     try:
-        blocks = siyuan_sql(
-            f"SELECT type, subtype, content, markdown FROM blocks "
-            f"WHERE root_id = '{_siyuan_doc_id}' AND type != 'd' ORDER BY sort"
-        )
-        _siyuan_full_content = "\n".join(
-            (b.get("content", "") + " " + b.get("markdown", ""))
-            for b in (blocks or [])
-        )
-        _siyuan_headings = [
-            b.get("content", "") for b in (blocks or []) if b.get("type") == "h"
-        ]
+        md = siyuan_export_md(_siyuan_doc_id)
+        sections = md_sections(md)
+        _siyuan_full_content = md
+        _siyuan_headings = [title for _lvl, title, _lines in sections]
 
         section_patterns = {
             "Introduction": r"(导言|introduction|intro)",
@@ -503,22 +544,12 @@ def check_9_siyuan_introduction_length() -> None:
         check("9. SiYuan: Introduction ≥120 chars", 1, False, "skipped: doc not found")
         return
     try:
-        blocks = siyuan_sql(
-            f"SELECT type, content, markdown FROM blocks "
-            f"WHERE root_id = '{_siyuan_doc_id}' AND type != 'd' ORDER BY sort"
-        )
+        md = siyuan_export_md(_siyuan_doc_id)
         intro_text = ""
-        in_intro = False
-        for b in (blocks or []):
-            btype = b.get("type", "")
-            content = b.get("content", "")
-            if btype == "h" and re.search(r"(导言|introduction|intro)", content, re.IGNORECASE):
-                in_intro = True
-                continue
-            if in_intro and btype == "h":
+        for _lvl, title, lines in md_sections(md):
+            if re.search(r"(导言|introduction|intro)", title, re.IGNORECASE):
+                intro_text = " ".join(l.strip() for l in lines if l.strip())
                 break
-            if in_intro:
-                intro_text += content + " "
 
         intro_len = len(intro_text.strip())
         passed = intro_len >= 120
@@ -559,22 +590,12 @@ def check_11_siyuan_conclusion_position() -> None:
               "skipped: doc not found")
         return
     try:
-        blocks = siyuan_sql(
-            f"SELECT type, content, markdown FROM blocks "
-            f"WHERE root_id = '{_siyuan_doc_id}' AND type != 'd' ORDER BY sort"
-        )
+        md = siyuan_export_md(_siyuan_doc_id)
         conclusion_text = ""
-        in_conclusion = False
-        for b in (blocks or []):
-            btype = b.get("type", "")
-            content = b.get("content", "")
-            if btype == "h" and re.search(r"(结论|conclusion)", content, re.IGNORECASE):
-                in_conclusion = True
-                continue
-            if in_conclusion and btype == "h":
+        for _lvl, title, lines in md_sections(md):
+            if re.search(r"(结论|conclusion)", title, re.IGNORECASE):
+                conclusion_text = " ".join(l.strip() for l in lines if l.strip())
                 break
-            if in_conclusion:
-                conclusion_text += content + " "
 
         if not conclusion_text.strip():
             check("11. SiYuan: conclusion takes explicit position", 2, False,

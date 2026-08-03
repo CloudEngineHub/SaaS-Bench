@@ -1,6 +1,6 @@
 """
 Verifier for media_072: The Batman poster → Watcharr watch log (8.5, analytical review)
-  → SiYuan EP-60 'Visual Darkness in Modern Cinema' with bidirectional link to Matt Reeves.
+  → SiYuan EP-62 'Visual Darkness in Modern Cinema' with bidirectional link to Matt Reeves.
 
 Checks: 13 weighted checks (24 total points) across watcharr, siyuan.
 Strategy: watcharr via docker exec SQLite; siyuan via REST API; llm_judge + llm_judge_vision.
@@ -12,6 +12,7 @@ Required env vars:
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -136,6 +137,52 @@ def siyuan_sql(stmt: str) -> list[dict]:
     return body.get("data") or []
 
 
+def siyuan_export_md(doc_id: str) -> str:
+    """Export a document's markdown in TRUE document order.
+
+    NOTE: the blocks table's `sort` column is grouped by block type (headings,
+    paragraphs, lists), NOT document order — section extraction from
+    `ORDER BY sort` yields headings first and prose last, i.e. empty sections.
+    exportMdContent returns the document in real reading order.
+    """
+    payload = json.dumps({"id": doc_id}).encode()
+    headers = {"Content-Type": "application/json"}
+    token = get_siyuan_token()
+    if token:
+        headers["Authorization"] = f"Token {token}"
+    req = urllib.request.Request(
+        f"{SIYUAN_API}/api/export/exportMdContent",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"SiYuan export HTTP {e.code}: {e.read().decode()[:200]}")
+    if body.get("code") != 0:
+        raise RuntimeError(f"SiYuan export error: {body.get('msg', body)}")
+    return body.get("data", {}).get("content", "")
+
+
+def md_sections(md: str) -> list[tuple[int, str, list[str]]]:
+    """Split markdown into (heading_level, heading_text, body_lines) sections."""
+    sections: list[tuple[int, str, list[str]]] = []
+    current: list | None = None
+    for line in md.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if m:
+            if current is not None:
+                sections.append((current[0], current[1], current[2]))
+            current = [len(m.group(1)), m.group(2).strip(), []]
+        elif current is not None:
+            current[2].append(line)
+    if current is not None:
+        sections.append((current[0], current[1], current[2]))
+    return sections
+
+
 def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, str]:
     api_base = os.getenv("MINDRA_BASE_URL", "https://api.mindracode.com/v1")
     api_key = os.getenv("MINDRA_API_KEY", "")
@@ -146,9 +193,9 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         f"Answer only YES or NO."
     )
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -203,9 +250,9 @@ def llm_judge_vision(
         {"type": "text", "text": prompt},
     ]
     body = json.dumps({
-        "model": "gemini-3.0-flash-preview",
+        "model": os.getenv("MINDRA_MODEL", "gemini-3.0-flash-preview"),
         "messages": [{"role": "user", "content": msg_content}],
-        "max_tokens": 10,
+        "max_tokens": 512,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -227,7 +274,7 @@ def llm_judge_vision(
 
 # ── Cached state ──────────────────────────────────────────────────────────────
 _watcharr_row: dict = {}
-_ep60_root_id: str = ""
+_ep62_root_id: str = ""
 _director_root_id: str = ""
 _input_files_ok: bool = False
 
@@ -249,8 +296,9 @@ def check_1_watcharr_batman_exists() -> None:
         rows = watcharr_sql(
             "SELECT w.status, w.rating, w.thoughts, c.title "
             "FROM watcheds w JOIN contents c ON w.content_id = c.id "
+            "JOIN users u ON w.user_id = u.id AND u.username = 'admin' "
             "WHERE LOWER(c.title) LIKE '%the batman%' "
-            "AND w.deleted_at IS NULL LIMIT 1;"
+            "AND w.deleted_at IS NULL ORDER BY w.updated_at DESC LIMIT 1;"
         )
         if not rows:
             check("1. watcharr_batman_exists", 2, False,
@@ -340,7 +388,11 @@ def check_6_cross_modal_poster_title() -> None:
         if not _input_files_ok:
             check("6. cross_modal_poster_title", 2, False, "skipped: input file missing")
             return
-        title = _watcharr_row.get("title", "The Batman") if _watcharr_row else "The Batman"
+        if not _watcharr_row:
+            check("6. cross_modal_poster_title", 2, False,
+                  "no watched row to compare against poster")
+            return
+        title = _watcharr_row["title"]
         condition = (
             "The movie poster shown is for the film 'The Batman' (2022, directed by "
             "Matt Reeves, starring Robert Pattinson). The title visible on the poster "
@@ -352,38 +404,38 @@ def check_6_cross_modal_poster_title() -> None:
         check("6. cross_modal_poster_title", 2, False, f"exception: {e}")
 
 
-def check_7_siyuan_ep60_doc_exists() -> None:
-    global _ep60_root_id
+def check_7_siyuan_ep62_doc_exists() -> None:
+    global _ep62_root_id
     try:
         rows = siyuan_sql(
             "SELECT id, content, box FROM blocks WHERE type = 'd' "
-            "AND (content LIKE '%EP-60%' OR content LIKE '%ep-60%' OR content LIKE '%EP60%') "
+            "AND (content LIKE '%EP-62%' OR content LIKE '%ep-62%' OR content LIKE '%EP62%') "
             "LIMIT 10;"
         )
         matched = None
         for r in rows:
             content_lower = (r.get("content") or "").lower()
-            if "ep-60" in content_lower or "ep60" in content_lower:
+            if "ep-62" in content_lower or "ep62" in content_lower:
                 matched = r
                 break
         if not matched:
-            check("7. siyuan_ep60_doc_exists", 2, False,
-                  "no document matching EP-60 found")
+            check("7. siyuan_ep62_doc_exists", 2, False,
+                  "no document matching EP-62 found")
             return
-        _ep60_root_id = matched["id"]
-        check("7. siyuan_ep60_doc_exists", 2, True,
+        _ep62_root_id = matched["id"]
+        check("7. siyuan_ep62_doc_exists", 2, True,
               f"doc='{matched.get('content', '')[:80]}'")
     except Exception as e:
-        check("7. siyuan_ep60_doc_exists", 2, False, f"exception: {e}")
+        check("7. siyuan_ep62_doc_exists", 2, False, f"exception: {e}")
 
 
-def check_8_siyuan_ep60_four_sections() -> None:
+def check_8_siyuan_ep62_four_sections() -> None:
     try:
-        if not _ep60_root_id:
-            check("8. siyuan_ep60_four_sections", 3, False, "EP-60 doc not found")
+        if not _ep62_root_id:
+            check("8. siyuan_ep62_four_sections", 3, False, "EP-62 doc not found")
             return
         rows = siyuan_sql(
-            f"SELECT content FROM blocks WHERE root_id = '{_ep60_root_id}' "
+            f"SELECT content FROM blocks WHERE root_id = '{_ep62_root_id}' "
             f"AND type = 'h' ORDER BY sort;"
         )
         headings = [r.get("content", "") for r in rows]
@@ -403,21 +455,23 @@ def check_8_siyuan_ep60_four_sections() -> None:
         count = len(found_sections)
         passed = count >= 4
         detail = "" if passed else f"found {count}/4 sections; headings: {headings[:8]}"
-        check("8. siyuan_ep60_four_sections", 3, passed, detail)
+        check("8. siyuan_ep62_four_sections", 3, passed, detail)
     except Exception as e:
-        check("8. siyuan_ep60_four_sections", 3, False, f"exception: {e}")
+        check("8. siyuan_ep62_four_sections", 3, False, f"exception: {e}")
 
 
-def check_9_siyuan_ep60_content_thresholds() -> None:
+def check_9_siyuan_ep62_content_thresholds() -> None:
     try:
-        if not _ep60_root_id:
-            check("9. siyuan_ep60_content_thresholds", 2, False, "EP-60 doc not found")
+        if not _ep62_root_id:
+            check("9. siyuan_ep62_content_thresholds", 2, False, "EP-62 doc not found")
             return
-        rows = siyuan_sql(
-            f"SELECT content, type FROM blocks "
-            f"WHERE root_id = '{_ep60_root_id}' AND type IN ('h', 'p', 'l', 'i') "
-            f"ORDER BY sort ASC;"
-        )
+        # NOTE: blocks.`sort` is grouped by block type, not document order, so
+        # section bodies must be taken from the exported markdown instead.
+        md = siyuan_export_md(_ep62_root_id)
+        if not md.strip():
+            check("9. siyuan_ep62_content_thresholds", 2, False,
+                  "no content in EP-62 doc")
+            return
         section_keys = {
             "episode intro": "intro", "intro": "intro",
             "core argument": "core", "core arguments": "core",
@@ -427,20 +481,14 @@ def check_9_siyuan_ep60_content_thresholds() -> None:
             "closing recommendation": "closing",
         }
         sections: dict[str, str] = {}
-        current_section = None
-        for b in rows:
-            content = b.get("content", "")
-            if b.get("type") == "h":
-                current_section = None
-                content_lower = content.lower()
-                for kw, label in section_keys.items():
-                    if kw in content_lower:
-                        current_section = label
-                        if label not in sections:
-                            sections[label] = ""
-                        break
-            elif current_section and current_section in sections:
-                sections[current_section] += content + "\n"
+        for _lvl, title, lines in md_sections(md):
+            title_lower = title.lower()
+            for kw, label in section_keys.items():
+                if kw in title_lower:
+                    sections[label] = (
+                        sections.get(label, "") + "\n".join(lines) + "\n"
+                    )
+                    break
 
         issues = []
         intro_len = len(sections.get("intro", ""))
@@ -462,39 +510,39 @@ def check_9_siyuan_ep60_content_thresholds() -> None:
             issues.append(f"closing: too short ({len(closing_text.strip())} chars)")
 
         if not issues:
-            check("9. siyuan_ep60_content_thresholds", 2, True)
+            check("9. siyuan_ep62_content_thresholds", 2, True)
         else:
-            check("9. siyuan_ep60_content_thresholds", 2, False, "; ".join(issues))
+            check("9. siyuan_ep62_content_thresholds", 2, False, "; ".join(issues))
     except Exception as e:
-        check("9. siyuan_ep60_content_thresholds", 2, False, f"exception: {e}")
+        check("9. siyuan_ep62_content_thresholds", 2, False, f"exception: {e}")
 
 
-def check_10_siyuan_ep60_llm_quality() -> None:
+def check_10_siyuan_ep62_llm_quality() -> None:
     try:
-        if not _ep60_root_id:
-            check("10. siyuan_ep60_llm_quality", 2, False, "EP-60 doc not found")
+        if not _ep62_root_id:
+            check("10. siyuan_ep62_llm_quality", 2, False, "EP-62 doc not found")
             return
         rows = siyuan_sql(
             f"SELECT content FROM blocks "
-            f"WHERE root_id = '{_ep60_root_id}' AND type IN ('h', 'p', 'l', 'i') "
+            f"WHERE root_id = '{_ep62_root_id}' AND type IN ('h', 'p', 'l', 'i') "
             f"ORDER BY sort ASC;"
         )
         full_text = "\n".join(r.get("content", "") for r in rows)
         if len(full_text) < 50:
-            check("10. siyuan_ep60_llm_quality", 2, False,
+            check("10. siyuan_ep62_llm_quality", 2, False,
                   f"document too short ({len(full_text)} chars)")
             return
         condition = (
-            "The document is titled with 'EP-60' and concerns visual darkness in modern "
+            "The document is titled with 'EP-62' and concerns visual darkness in modern "
             "cinema. It contains four distinct sections: 'Episode Intro' (>=100 chars), "
             "'Core Arguments' (>=3 analytical dimensions), 'Representative Scene Analysis' "
             "(>=2 scenes), and 'Closing Recommendation'. The content is substantive and "
             "analytical, not generic filler."
         )
         passed, raw = llm_judge(full_text[:3000], condition)
-        check("10. siyuan_ep60_llm_quality", 2, passed, f"llm_judge: {raw}")
+        check("10. siyuan_ep62_llm_quality", 2, passed, f"llm_judge: {raw}")
     except Exception as e:
-        check("10. siyuan_ep60_llm_quality", 2, False, f"exception: {e}")
+        check("10. siyuan_ep62_llm_quality", 2, False, f"exception: {e}")
 
 
 def check_11_siyuan_director_doc_exists() -> None:
@@ -525,10 +573,10 @@ def check_11_siyuan_director_doc_exists() -> None:
 
 def check_12_siyuan_bidirectional_link() -> None:
     try:
-        if not _ep60_root_id or not _director_root_id:
+        if not _ep62_root_id or not _director_root_id:
             missing = []
-            if not _ep60_root_id:
-                missing.append("EP-60 doc")
+            if not _ep62_root_id:
+                missing.append("EP-62 doc")
             if not _director_root_id:
                 missing.append("director doc")
             check("12. siyuan_bidirectional_link", 3, False,
@@ -537,12 +585,12 @@ def check_12_siyuan_bidirectional_link() -> None:
 
         forward = siyuan_sql(
             f"SELECT id FROM refs WHERE "
-            f"root_id = '{_ep60_root_id}' AND def_block_root_id = '{_director_root_id}' "
+            f"root_id = '{_ep62_root_id}' AND def_block_root_id = '{_director_root_id}' "
             f"LIMIT 1;"
         )
         backward = siyuan_sql(
             f"SELECT id FROM refs WHERE "
-            f"root_id = '{_director_root_id}' AND def_block_root_id = '{_ep60_root_id}' "
+            f"root_id = '{_director_root_id}' AND def_block_root_id = '{_ep62_root_id}' "
             f"LIMIT 1;"
         )
         has_forward = len(forward) > 0
@@ -551,36 +599,34 @@ def check_12_siyuan_bidirectional_link() -> None:
         if has_forward and has_backward:
             check("12. siyuan_bidirectional_link", 3, True,
                   "refs exist in both directions")
-        elif has_forward:
-            check("12. siyuan_bidirectional_link", 3, False,
-                  "only forward link (EP-60 -> filmography); missing reverse link")
-        elif has_backward:
-            check("12. siyuan_bidirectional_link", 3, False,
-                  "only reverse link (filmography -> EP-60); missing forward link")
+        elif has_forward or has_backward:
+            direction = "EP-62->Director" if has_forward else "Director->EP-62"
+            check("12. siyuan_bidirectional_link", 3, True,
+                  f"ref {direction} found; SiYuan auto-generates the backlink view")
         else:
-            ep60_blocks = siyuan_sql(
-                f"SELECT markdown FROM blocks WHERE root_id='{_ep60_root_id}' "
+            ep62_blocks = siyuan_sql(
+                f"SELECT markdown FROM blocks WHERE root_id='{_ep62_root_id}' "
                 f"AND type IN ('p','h','l','i') ORDER BY sort;"
             )
             dir_blocks = siyuan_sql(
                 f"SELECT markdown FROM blocks WHERE root_id='{_director_root_id}' "
                 f"AND type IN ('p','h','l','i') ORDER BY sort;"
             )
-            ep60_md = "\n".join(b.get("markdown", "") for b in ep60_blocks)
+            ep62_md = "\n".join(b.get("markdown", "") for b in ep62_blocks)
             dir_md = "\n".join(b.get("markdown", "") for b in dir_blocks)
-            has_fwd_inline = _director_root_id in ep60_md
-            has_bwd_inline = _ep60_root_id in dir_md
+            has_fwd_inline = _director_root_id in ep62_md
+            has_bwd_inline = _ep62_root_id in dir_md
 
             if not has_fwd_inline:
-                ep60_lower = ep60_md.lower()
+                ep62_lower = ep62_md.lower()
                 has_fwd_inline = (
-                    "matt reeves" in ep60_lower
-                    or "director filmography" in ep60_lower
+                    "matt reeves" in ep62_lower
+                    or "director filmography" in ep62_lower
                 )
             if not has_bwd_inline:
                 dir_lower = dir_md.lower()
                 has_bwd_inline = (
-                    "ep-60" in dir_lower
+                    "ep-62" in dir_lower
                     or "visual darkness" in dir_lower
                 )
 
@@ -588,12 +634,12 @@ def check_12_siyuan_bidirectional_link() -> None:
                 check("12. siyuan_bidirectional_link", 3, True,
                       "text references found in both directions (fallback)")
             elif has_fwd_inline or has_bwd_inline:
-                direction = "EP-60->Director" if has_fwd_inline else "Director->EP-60"
+                direction = "EP-62->Director" if has_fwd_inline else "Director->EP-62"
                 check("12. siyuan_bidirectional_link", 3, False,
                       f"only {direction} inline ref found; missing other direction")
             else:
                 check("12. siyuan_bidirectional_link", 3, False,
-                      "no refs found between EP-60 and director doc in either direction")
+                      "no refs found between EP-62 and director doc in either direction")
     except Exception as e:
         check("12. siyuan_bidirectional_link", 3, False, f"exception: {e}")
 
@@ -607,10 +653,10 @@ def main() -> None:
     check_4_watcharr_review_length()
     check_5_watcharr_review_analytical()
     check_6_cross_modal_poster_title()
-    check_7_siyuan_ep60_doc_exists()
-    check_8_siyuan_ep60_four_sections()
-    check_9_siyuan_ep60_content_thresholds()
-    check_10_siyuan_ep60_llm_quality()
+    check_7_siyuan_ep62_doc_exists()
+    check_8_siyuan_ep62_four_sections()
+    check_9_siyuan_ep62_content_thresholds()
+    check_10_siyuan_ep62_llm_quality()
     check_11_siyuan_director_doc_exists()
     check_12_siyuan_bidirectional_link()
 

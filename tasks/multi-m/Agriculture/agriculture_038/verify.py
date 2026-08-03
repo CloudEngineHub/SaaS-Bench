@@ -1,18 +1,19 @@
 """
-Verifier for agriculture_038: Cross-app batch traceability audit (Grocy <-> FarmOS)
+Verifier for agriculture_038: Cross-app batch traceability audit — check the
+warehouse's receiving manifest (Grocy product -> batch number) against FarmOS
+harvest log names; flag products whose batch number matches no harvest log.
 
-Checks: 10 weighted checks (18 pts total) across grocy, farmos.
-Strategy: docker exec PHP/SQLite for both Grocy and FarmOS.
+Checks: 6 weighted checks (12 total points) across grocy, farmos.
+Strategy: grocy=docker exec PHP PDO (SQLite); farmos=docker exec PHP PDO (SQLite)
 
 Required env vars:
   SERVER_HOSTNAME, GROCY_PORT, GROCY_CONTAINER, FARMOS_PORT, FARMOS_CONTAINER
 """
 
-import os
-import sys
-import subprocess
 import json
-import base64
+import os
+import subprocess
+import sys
 
 # ── Config (from env) ─────────────────────────────────────────────────────────
 HOST = os.getenv("SERVER_HOSTNAME", "localhost")
@@ -31,367 +32,286 @@ for _var, _val in [
         print(f"FATAL: {_var} not set", file=sys.stderr)
         sys.exit(1)
 
-GROCY_DB_PATH = "/config/data/grocy.db"
-FARMOS_DB_PATH = "/opt/drupal/web/sites/default/files/.ht.sqlite"
+FARMOS_SQLITE = "/opt/drupal/web/sites/default/files/.ht.sqlite"
+
+GROCY_DB_CANDIDATES = [
+    "/config/data/grocy.db",
+    "/config/data/data/grocy.db",
+    "/var/www/data/grocy.db",
+]
 
 DISCREPANCY_TEXT = "DISCREPANCY: No FarmOS Harvest Log"
 
+# Receiving manifest from the task description: exact Grocy product name ->
+# batch number. Matched entries reference FarmOS harvest logs that exist
+# verbatim; unmatched entries reference harvest logs that do NOT exist.
+MANIFEST_MATCHED = {
+    "Boni Bio Apples": "Honeycrisp Apple Harvest — East Orchard 2024",
+    "Italian Style Diced Tomatoes": "2024 Beefsteak Tomato Harvest — North Field West Bed 1",
+    "Diced Potatoes With Onion": "2024 Yellow Onion Harvest — North Field Center Bed",
+    "Stewed Tomatoes": "2024 Cherry Tomato Harvest — North Field West Bed 2",
+}
+MANIFEST_UNMATCHED = {
+    "Tomato Sauce": "2024 Cherry Tomato Harvest — North Field West Bed 3",
+    "Gazpacho": "2024 Gazpacho Harvest — South Field 1",
+    "Longan In Syrup": "2024 Longan Harvest — West Greenhouse 1",
+    "100% Juice Cranberry Blend": "2024 Cranberry Harvest — River Bottom Parcel 1",
+}
+
 # ── Result accumulator ────────────────────────────────────────────────────────
-_checks: list[tuple[str, int, bool, str, bool]] = []
+_checks: list[tuple[str, int, bool, str]] = []
 
 
-def check(label: str, weight: int, passed: bool, detail: str = "", *, skipped: bool = False) -> None:
-    _checks.append((label, weight, passed, detail, skipped))
+def check(label: str, weight: int, passed: bool, detail: str = "") -> None:
+    _checks.append((label, weight, passed, detail))
+    status = "PASS" if passed else "FAIL"
     tail = f"  ({detail})" if detail else ""
-    if skipped:
-        print(f"[SKIP] (0/{weight}pt) {label}{tail}", file=sys.stderr)
-    else:
-        status = "PASS" if passed else "FAIL"
-        print(f"[{status}] ({weight}pt) {label}{tail}", file=sys.stderr)
+    print(f"[{status}] ({weight}pt) {label}{tail}", file=sys.stderr)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def grocy_query(sql: str, timeout: int = 15) -> list[dict]:
-    php_code = (
-        '$pdo = new PDO("sqlite:' + GROCY_DB_PATH + '");'
-        "$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);"
-        "$stmt = $pdo->query(" + json.dumps(sql) + ");"
-        "$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);"
-        "echo json_encode($rows);"
-    )
+def docker_exec(container: str, *args: str, timeout: int = 15) -> tuple[int, str, str]:
     r = subprocess.run(
-        ["docker", "exec", GROCY_CONTAINER, "php", "-r", php_code],
+        ["docker", "exec", container, *args],
         capture_output=True, text=True, timeout=timeout,
     )
-    if r.returncode != 0:
-        raise RuntimeError(f"Grocy PHP query error: {r.stderr.strip()}")
-    if not r.stdout.strip():
+    return r.returncode, r.stdout, r.stderr
+
+
+_grocy_db_path = ""
+
+
+def _find_grocy_db() -> str:
+    global _grocy_db_path
+    if _grocy_db_path:
+        return _grocy_db_path
+    for path in GROCY_DB_CANDIDATES:
+        rc, _, _ = docker_exec(GROCY_CONTAINER, "test", "-f", path)
+        if rc == 0:
+            _grocy_db_path = path
+            return path
+    _grocy_db_path = GROCY_DB_CANDIDATES[0]
+    return _grocy_db_path
+
+
+def grocy_sql_json(query: str) -> list[dict]:
+    db = _find_grocy_db()
+    php_script = (
+        '$db = new PDO("sqlite:' + db + '");'
+        '$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);'
+        '$r = $db->query(' + json.dumps(query) + ');'
+        '$rows = $r->fetchAll(PDO::FETCH_ASSOC);'
+        'echo json_encode($rows);'
+    )
+    rc, stdout, stderr = docker_exec(
+        GROCY_CONTAINER, "php", "-r", php_script, timeout=15,
+    )
+    if rc != 0:
+        raise RuntimeError(f"grocy php error (rc={rc}): {stderr.strip()}")
+    if not stdout.strip():
         return []
-    return json.loads(r.stdout.strip())
+    return json.loads(stdout.strip())
 
 
-def farmos_query(sql: str, timeout: int = 15) -> list[dict]:
-    b64_sql = base64.b64encode(sql.encode()).decode()
-    php_code = (
-        "$sql = base64_decode('" + b64_sql + "');"
-        "$db = new SQLite3('" + FARMOS_DB_PATH + "');"
-        "$db->createCollation('NOCASE_UTF8', function($a,$b){return strnatcasecmp($a,$b);});"
-        "$r = $db->query($sql);"
-        "if (!$r) { echo '[]'; exit(0); }"
-        "$rows = [];"
-        "while ($row = $r->fetchArray(SQLITE3_ASSOC)) $rows[] = $row;"
-        "echo json_encode($rows);"
+def farmos_sql_json(query: str) -> list[dict]:
+    php_script = (
+        '$db = new PDO("sqlite:' + FARMOS_SQLITE + '");'
+        '$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);'
+        '$r = $db->query(' + json.dumps(query) + ');'
+        '$rows = $r->fetchAll(PDO::FETCH_ASSOC);'
+        'echo json_encode($rows);'
     )
-    r = subprocess.run(
-        ["docker", "exec", FARMOS_CONTAINER, "php", "-r", php_code],
-        capture_output=True, text=True, timeout=timeout,
+    rc, stdout, stderr = docker_exec(
+        FARMOS_CONTAINER, "php", "-r", php_script, timeout=15,
     )
-    if r.returncode != 0:
-        raise RuntimeError(f"FarmOS PHP query error: {r.stdout.strip()} {r.stderr.strip()}")
-    if not r.stdout.strip():
+    if rc != 0:
+        raise RuntimeError(f"farmos php error (rc={rc}): {stderr.strip()}")
+    if not stdout.strip():
         return []
-    return json.loads(r.stdout.strip())
+    return json.loads(stdout.strip())
 
 
-# ── Data fetchers ─────────────────────────────────────────────────────────────
-def get_grocy_batch_products() -> list[dict]:
-    """Get all Grocy products with a non-empty batch_number userfield."""
-    sql = (
-        "SELECT p.id AS product_id, p.name AS product_name, "
-        "COALESCE(p.description, '') AS description, uv.value AS batch_number "
-        "FROM products p "
-        "JOIN userfield_values uv ON uv.object_id = CAST(p.id AS TEXT) "
-        "JOIN userfields uf ON uf.id = uv.field_id "
-        "WHERE uf.entity = 'products' AND uf.name = 'batch_number' "
-        "AND uv.value IS NOT NULL AND uv.value != ''"
+# ── Cached state ──────────────────────────────────────────────────────────────
+_products_by_name: dict[str, dict] | None = None
+_farmos_harvest_names: set[str] | None = None
+
+
+def _load_manifest_products() -> dict[str, dict]:
+    """Grocy products referenced by the manifest, keyed by exact name."""
+    global _products_by_name
+    if _products_by_name is not None:
+        return _products_by_name
+    names = list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+    quoted = ", ".join("'" + n.replace("'", "''") + "'" for n in names)
+    rows = grocy_sql_json(
+        "SELECT id, name, COALESCE(description, '') AS description "
+        f"FROM products WHERE name IN ({quoted})"
     )
-    return grocy_query(sql)
+    _products_by_name = {r["name"]: r for r in rows}
+    return _products_by_name
 
 
-def get_farmos_harvest_log_names() -> set[str]:
-    """Get all FarmOS harvest log names as a set."""
-    sql = (
-        "SELECT name FROM log_field_data "
-        "WHERE type = 'harvest' AND name IS NOT NULL AND name != ''"
+def _load_farmos_harvest_names() -> set[str]:
+    global _farmos_harvest_names
+    if _farmos_harvest_names is not None:
+        return _farmos_harvest_names
+    rows = farmos_sql_json(
+        "SELECT name FROM log_field_data WHERE type = 'harvest'"
     )
-    rows = farmos_query(sql)
-    return {r["name"] for r in rows}
-
-
-# ── Precondition probe ───────────────────────────────────────────────────────
-_batch_userfield_seeded_cache: bool | None = None
-
-
-def _batch_userfield_seeded() -> bool:
-    """Returns True iff the `batch_number` userfield is registered on `products`.
-
-    Used to mark seed-dependent checks as SKIPPED when the environment hasn't
-    been provisioned with the `batch_number` userfield — the agent has no way
-    to influence this, so it should not affect the score.
-    """
-    global _batch_userfield_seeded_cache
-    if _batch_userfield_seeded_cache is not None:
-        return _batch_userfield_seeded_cache
-    try:
-        rows = grocy_query(
-            "SELECT 1 FROM userfields WHERE entity = 'products' AND name = 'batch_number'"
-        )
-        _batch_userfield_seeded_cache = len(rows) > 0
-    except Exception:
-        _batch_userfield_seeded_cache = False
-    return _batch_userfield_seeded_cache
+    _farmos_harvest_names = {r["name"].strip() for r in rows if r.get("name")}
+    return _farmos_harvest_names
 
 
 # ── Individual checks ─────────────────────────────────────────────────────────
-def check_1_batch_number_userfield_exists() -> None:
-    """Grocy has a userfield named 'batch_number' on entity 'products'."""
+def check_1_manifest_products_exist() -> None:
+    """All 8 manifest products exist in Grocy (exact name)."""
     try:
-        rows = grocy_query(
-            "SELECT id, entity, name, caption FROM userfields "
-            "WHERE entity = 'products' AND name = 'batch_number'"
+        products = _load_manifest_products()
+        missing = [n for n in list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+                   if n not in products]
+        check("1. manifest_products_exist", 1, not missing,
+              f"found {len(products)}/8 manifest products" if not missing
+              else f"missing products: {'; '.join(missing)}")
+    except Exception as e:
+        check("1. manifest_products_exist", 1, False, f"exception: {e}")
+
+
+def check_2_farmos_logs_match_manifest() -> None:
+    """FarmOS harvest logs are retrievable and consistent with the manifest:
+    every matched batch number exists verbatim, no unmatched one does."""
+    try:
+        names = _load_farmos_harvest_names()
+        if not names:
+            check("2. farmos_logs_match_manifest", 1, False,
+                  "no harvest logs found in farmos")
+            return
+        missing = [b for b in MANIFEST_MATCHED.values() if b not in names]
+        unexpected = [b for b in MANIFEST_UNMATCHED.values() if b in names]
+        problems = []
+        if missing:
+            problems.append(f"expected logs missing: {'; '.join(missing)}")
+        if unexpected:
+            problems.append(f"unexpected logs present: {'; '.join(unexpected)}")
+        check("2. farmos_logs_match_manifest", 1, not problems,
+              f"{len(names)} harvest logs; manifest references consistent"
+              if not problems else " — ".join(problems))
+    except Exception as e:
+        check("2. farmos_logs_match_manifest", 1, False, f"exception: {e}")
+
+
+def check_3_unmatched_products_flagged() -> None:
+    """Every manifest product whose batch number has no FarmOS harvest log
+    carries the exact discrepancy text in its description."""
+    try:
+        products = _load_manifest_products()
+        missing_flag = []
+        for name in MANIFEST_UNMATCHED:
+            p = products.get(name)
+            if not p:
+                missing_flag.append(f"{name} (product not found)")
+            elif DISCREPANCY_TEXT not in p["description"]:
+                missing_flag.append(name)
+        check("3. unmatched_products_flagged", 4, not missing_flag,
+              f"all {len(MANIFEST_UNMATCHED)} unmatched products flagged"
+              if not missing_flag
+              else f"unmatched products lacking discrepancy text: {'; '.join(missing_flag)}")
+    except Exception as e:
+        check("3. unmatched_products_flagged", 4, False, f"exception: {e}")
+
+
+def check_4_matched_products_not_flagged() -> None:
+    """Products whose batch number exists in FarmOS must NOT be flagged.
+    Requires audit evidence first (at least one unmatched product flagged)."""
+    try:
+        products = _load_manifest_products()
+        flagged_unmatched = [
+            name for name in MANIFEST_UNMATCHED
+            if products.get(name) and DISCREPANCY_TEXT in products[name]["description"]
+        ]
+        if not flagged_unmatched:
+            check("4. matched_products_not_flagged", 2, False,
+                  "no audit evidence: no unmatched product has been flagged yet")
+            return
+        wrongly_flagged = [
+            name for name in MANIFEST_MATCHED
+            if products.get(name) and DISCREPANCY_TEXT in products[name]["description"]
+        ]
+        check("4. matched_products_not_flagged", 2, not wrongly_flagged,
+              f"all {len(MANIFEST_MATCHED)} matched products correctly unflagged"
+              if not wrongly_flagged
+              else f"matched products wrongly flagged: {'; '.join(wrongly_flagged)}")
+    except Exception as e:
+        check("4. matched_products_not_flagged", 2, False, f"exception: {e}")
+
+
+def check_5_flag_appended_not_replaced() -> None:
+    """The discrepancy text is appended after the existing description text,
+    not used as a replacement for it."""
+    try:
+        products = _load_manifest_products()
+        flagged = [
+            (name, products[name]["description"])
+            for name in MANIFEST_UNMATCHED
+            if products.get(name) and DISCREPANCY_TEXT in products[name]["description"]
+        ]
+        if not flagged:
+            check("5. flag_appended_not_replaced", 2, False,
+                  "no flagged products found to verify append position")
+            return
+        bad = [name for name, desc in flagged
+               if desc.index(DISCREPANCY_TEXT) == 0]
+        check("5. flag_appended_not_replaced", 2, not bad,
+              f"all {len(flagged)} flagged products keep their original text"
+              if not bad
+              else f"discrepancy text replaces original description in: {'; '.join(bad)}")
+    except Exception as e:
+        check("5. flag_appended_not_replaced", 2, False, f"exception: {e}")
+
+
+def check_6_flag_targeting_exact() -> None:
+    """Store-wide, exactly the unmatched manifest products carry the
+    discrepancy text — no more, no fewer."""
+    try:
+        rows = grocy_sql_json(
+            "SELECT name FROM products WHERE description LIKE "
+            "'%" + DISCREPANCY_TEXT + "%'"
         )
-        if rows:
-            check("1. batch_number_userfield_exists", 1, True,
-                  f"found userfield id={rows[0]['id']}")
-        else:
-            check("1. batch_number_userfield_exists", 1, False,
-                  "skipped: no batch_number userfield on products (environment seed missing)",
-                  skipped=True)
-    except Exception as e:
-        check("1. batch_number_userfield_exists", 1, False, f"exception: {e}")
-
-
-def check_2_products_have_batch_numbers() -> None:
-    """At least one Grocy product has a non-empty batch_number value."""
-    try:
-        if not _batch_userfield_seeded():
-            check("2. products_have_batch_numbers", 1, False,
-                  "skipped: batch_number userfield not seeded in environment",
-                  skipped=True)
+        flagged_names = {r["name"] for r in rows}
+        if not flagged_names:
+            check("6. flag_targeting_exact", 2, False,
+                  "no products flagged anywhere in grocy")
             return
-        products = get_grocy_batch_products()
-        check("2. products_have_batch_numbers", 1, len(products) > 0,
-              f"found {len(products)} products with batch_number" if products
-              else "no products have batch_number values")
+        expected = set(MANIFEST_UNMATCHED)
+        extra = sorted(flagged_names - expected)
+        missing = sorted(expected - flagged_names)
+        problems = []
+        if extra:
+            problems.append(f"unexpected flags: {'; '.join(extra)}")
+        if missing:
+            problems.append(f"missing flags: {'; '.join(missing)}")
+        check("6. flag_targeting_exact", 2, not problems,
+              f"exactly the {len(expected)} unmatched products are flagged"
+              if not problems else " — ".join(problems))
     except Exception as e:
-        check("2. products_have_batch_numbers", 1, False, f"exception: {e}")
-
-
-def check_3_farmos_harvest_logs_exist() -> None:
-    """FarmOS has at least one harvest log."""
-    try:
-        names = get_farmos_harvest_log_names()
-        check("3. farmos_harvest_logs_exist", 1, len(names) > 0,
-              f"found {len(names)} harvest logs" if names else "no harvest logs in FarmOS")
-    except Exception as e:
-        check("3. farmos_harvest_logs_exist", 1, False, f"exception: {e}")
-
-
-def check_4_matched_products_no_discrepancy() -> None:
-    """Products whose batch_number matches a FarmOS harvest log do NOT have the discrepancy text."""
-    try:
-        if not _batch_userfield_seeded():
-            check("4. matched_products_no_discrepancy", 2, False,
-                  "skipped: batch_number userfield not seeded in environment",
-                  skipped=True)
-            return
-        products = get_grocy_batch_products()
-        harvest_names = get_farmos_harvest_log_names()
-        matched = [p for p in products if p["batch_number"] in harvest_names]
-        false_flags = [
-            f"{p['product_name']} (batch={p['batch_number']})"
-            for p in matched if DISCREPANCY_TEXT in p.get("description", "")
-        ]
-        if not matched:
-            check("4. matched_products_no_discrepancy", 2, False,
-                  "vacuous: no matched products (precondition not met — no batch_number values or no harvest logs)")
-        else:
-            check("4. matched_products_no_discrepancy", 2, len(false_flags) == 0,
-                  f"false flags: {', '.join(false_flags[:5])}" if false_flags else "no false flags")
-    except Exception as e:
-        check("4. matched_products_no_discrepancy", 2, False, f"exception: {e}")
-
-
-def check_5_unmatched_products_have_discrepancy() -> None:
-    """Unmatched products have 'DISCREPANCY: No FarmOS Harvest Log' in their description."""
-    try:
-        if not _batch_userfield_seeded():
-            check("5. unmatched_products_have_discrepancy", 3, False,
-                  "skipped: batch_number userfield not seeded in environment",
-                  skipped=True)
-            return
-        products = get_grocy_batch_products()
-        harvest_names = get_farmos_harvest_log_names()
-        unmatched = [p for p in products if p["batch_number"] not in harvest_names]
-        missing_flag = [
-            f"{p['product_name']} (batch={p['batch_number']})"
-            for p in unmatched if DISCREPANCY_TEXT not in p.get("description", "")
-        ]
-        if not unmatched:
-            check("5. unmatched_products_have_discrepancy", 3, False,
-                  "vacuous: no unmatched products (precondition not met — no batch_number values to evaluate)")
-        else:
-            check("5. unmatched_products_have_discrepancy", 3, len(missing_flag) == 0,
-                  f"missing discrepancy text: {', '.join(missing_flag[:5])}"
-                  if missing_flag else f"all {len(unmatched)} unmatched products flagged")
-    except Exception as e:
-        check("5. unmatched_products_have_discrepancy", 3, False, f"exception: {e}")
-
-
-def check_6_discrepancy_text_appended() -> None:
-    """For flagged products, the discrepancy text is appended (not replacing the description)."""
-    try:
-        if not _batch_userfield_seeded():
-            check("6. discrepancy_text_appended", 2, False,
-                  "skipped: batch_number userfield not seeded in environment",
-                  skipped=True)
-            return
-        products = get_grocy_batch_products()
-        harvest_names = get_farmos_harvest_log_names()
-        unmatched_flagged = [
-            p for p in products
-            if p["batch_number"] not in harvest_names
-            and DISCREPANCY_TEXT in p.get("description", "")
-        ]
-        if not unmatched_flagged:
-            check("6. discrepancy_text_appended", 2, False,
-                  "vacuous: no flagged products (agent did not write the discrepancy text)")
-            return
-
-        bad = []
-        for p in unmatched_flagged:
-            desc = p.get("description", "").strip()
-            if desc == DISCREPANCY_TEXT:
-                pass
-            elif DISCREPANCY_TEXT not in desc:
-                bad.append(f"{p['product_name']}: text missing")
-            elif desc.startswith(DISCREPANCY_TEXT) and len(desc) > len(DISCREPANCY_TEXT):
-                bad.append(f"{p['product_name']}: discrepancy at start, not appended")
-
-        check("6. discrepancy_text_appended", 2, len(bad) == 0,
-              "; ".join(bad[:3]) if bad else f"{len(unmatched_flagged)} products correctly appended")
-    except Exception as e:
-        check("6. discrepancy_text_appended", 2, False, f"exception: {e}")
-
-
-def check_7_all_batch_products_checked() -> None:
-    """Every product with a batch_number was either matched or flagged."""
-    try:
-        products = get_grocy_batch_products()
-        harvest_names = get_farmos_harvest_log_names()
-        unchecked = [
-            f"{p['product_name']} (batch={p['batch_number']})"
-            for p in products
-            if p["batch_number"] not in harvest_names
-            and DISCREPANCY_TEXT not in p.get("description", "")
-        ]
-        check("7. all_batch_products_checked", 2, len(unchecked) == 0,
-              f"unchecked: {', '.join(unchecked[:5])}" if unchecked
-              else f"all {len(products)} batch products accounted for")
-    except Exception as e:
-        check("7. all_batch_products_checked", 2, False, f"exception: {e}")
-
-
-def check_8_no_false_positives() -> None:
-    """No product WITHOUT a batch_number has the discrepancy text."""
-    try:
-        sql = (
-            "SELECT p.id, p.name, COALESCE(p.description, '') AS description "
-            "FROM products p "
-            "WHERE p.id NOT IN ("
-            "  SELECT CAST(uv.object_id AS INTEGER) FROM userfield_values uv "
-            "  JOIN userfields uf ON uf.id = uv.field_id "
-            "  WHERE uf.entity = 'products' AND uf.name = 'batch_number' "
-            "  AND uv.value IS NOT NULL AND uv.value != ''"
-            ") AND p.description LIKE '%" + DISCREPANCY_TEXT + "%'"
-        )
-        rows = grocy_query(sql)
-        false_pos = [r["name"] for r in rows]
-        check("8. no_false_positives", 2, len(false_pos) == 0,
-              f"false positives: {', '.join(false_pos[:5])}" if false_pos
-              else "no products without batch_number have discrepancy text")
-    except Exception as e:
-        check("8. no_false_positives", 2, False, f"exception: {e}")
-
-
-def check_9_exact_match_used() -> None:
-    """FarmOS harvest log name field exactly matches batch_number (not partial)."""
-    try:
-        if not _batch_userfield_seeded():
-            check("9. exact_match_used", 2, False,
-                  "skipped: batch_number userfield not seeded in environment",
-                  skipped=True)
-            return
-        products = get_grocy_batch_products()
-        harvest_names = get_farmos_harvest_log_names()
-        matched = [p for p in products if p["batch_number"] in harvest_names]
-        if not matched:
-            check("9. exact_match_used", 2, False,
-                  "vacuous: no matched products to verify exact-match (precondition not met)")
-            return
-
-        bad = []
-        for p in matched:
-            bn = p["batch_number"]
-            partial_only = [h for h in harvest_names if bn in h and h != bn]
-            if partial_only and bn not in harvest_names:
-                bad.append(f"{p['product_name']}: partial match only ({partial_only[0]})")
-
-        check("9. exact_match_used", 2, len(bad) == 0,
-              "; ".join(bad[:3]) if bad else f"{len(matched)} exact matches confirmed")
-    except Exception as e:
-        check("9. exact_match_used", 2, False, f"exception: {e}")
-
-
-def check_10_discrepancy_count_correct() -> None:
-    """Count of flagged products equals count of unmatched batch numbers."""
-    try:
-        products = get_grocy_batch_products()
-        harvest_names = get_farmos_harvest_log_names()
-        unmatched_count = sum(1 for p in products if p["batch_number"] not in harvest_names)
-
-        flagged_sql = (
-            "SELECT COUNT(*) AS cnt FROM products p "
-            "JOIN userfield_values uv ON uv.object_id = CAST(p.id AS TEXT) "
-            "JOIN userfields uf ON uf.id = uv.field_id "
-            "WHERE uf.entity = 'products' AND uf.name = 'batch_number' "
-            "AND uv.value IS NOT NULL AND uv.value != '' "
-            "AND p.description LIKE '%" + DISCREPANCY_TEXT + "%'"
-        )
-        rows = grocy_query(flagged_sql)
-        flagged_count = int(rows[0]["cnt"]) if rows else 0
-
-        check("10. discrepancy_count_correct", 2, flagged_count == unmatched_count,
-              f"unmatched={unmatched_count}, flagged={flagged_count}"
-              if flagged_count != unmatched_count
-              else f"both={unmatched_count}")
-    except Exception as e:
-        check("10. discrepancy_count_correct", 2, False, f"exception: {e}")
+        check("6. flag_targeting_exact", 2, False, f"exception: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
-    check_1_batch_number_userfield_exists()
-    check_2_products_have_batch_numbers()
-    check_3_farmos_harvest_logs_exist()
-    check_4_matched_products_no_discrepancy()
-    check_5_unmatched_products_have_discrepancy()
-    check_6_discrepancy_text_appended()
-    check_7_all_batch_products_checked()
-    check_8_no_false_positives()
-    check_9_exact_match_used()
-    check_10_discrepancy_count_correct()
+    check_1_manifest_products_exist()
+    check_2_farmos_logs_match_manifest()
+    check_3_unmatched_products_flagged()
+    check_4_matched_products_not_flagged()
+    check_5_flag_appended_not_replaced()
+    check_6_flag_targeting_exact()
 
-    scored = [c for c in _checks if not c[4]]
-    total = sum(w for _, w, _, _, _ in scored)
-    earned = sum(w for _, w, p, _, _ in scored if p)
-    all_pass = all(p for _, _, p, _, _ in scored) and bool(scored)
+    total = sum(w for _, w, _, _ in _checks)
+    earned = sum(w for _, w, p, _ in _checks if p)
+    all_pass = all(p for _, _, p, _ in _checks) and bool(_checks)
     score = (earned / total) if total else 0.0
 
-    skipped_count = sum(1 for c in _checks if c[4])
-    skip_note = f"  (skipped {skipped_count})" if skipped_count else ""
     print(
-        f"SCORE: {score:.3f}  PASS: {all_pass}  ({earned}/{total}){skip_note}",
+        f"SCORE: {score:.3f}  PASS: {all_pass}  ({earned}/{total})",
         file=sys.stderr,
     )
     sys.exit(0 if all_pass else 1)

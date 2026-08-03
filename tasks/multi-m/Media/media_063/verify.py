@@ -33,7 +33,7 @@ for var_name, var_val in [
         print(f"FATAL: {var_name} not set", file=sys.stderr)
         sys.exit(1)
 
-BOOKLORE_DB_CONTAINER = os.getenv("BOOKLORE_DB_CONTAINER", BOOKLORE_CONTAINER + "-db")
+BOOKLORE_DB_CONTAINER = os.getenv("BOOKLORE_DB_CONTAINER") or BOOKLORE_CONTAINER
 BOOKLORE_BASE = f"http://{HOST}:{BOOKLORE_PORT}"
 SIYUAN_BASE = f"http://{HOST}:{SIYUAN_PORT}"
 
@@ -175,7 +175,7 @@ def check_2_read_status() -> None:
         check("2. Book status is 'Want to Read'", 2, False, "skipped: book not found")
         return
     try:
-        q_book = f"SELECT read_status FROM books WHERE id = {_book_id}"
+        q_book = f"SELECT read_status FROM book WHERE id = {_book_id}"
         status_book = mariadb_query(q_book).strip()
 
         q_progress = (
