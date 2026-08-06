@@ -172,45 +172,24 @@ def check_1_book_exists() -> None:
 
 def check_2_read_status() -> None:
     if not _book_id:
-        check("2. Book status is 'Want to Read'", 2, False, "skipped: book not found")
+        check("2. Book is on admin's 'Want to Read' shelf", 2, False,
+              "skipped: book not found")
         return
     try:
-        q_book = f"SELECT read_status FROM book WHERE id = {_book_id}"
-        status_book = mariadb_query(q_book).strip()
-
-        q_progress = (
-            f"SELECT read_status FROM user_book_progress "
-            f"WHERE book_id = {_book_id} LIMIT 1"
-        )
-        status_progress = mariadb_query(q_progress).strip()
-
         q_shelf = (
             f"SELECT s.name FROM shelf s "
             f"JOIN book_shelf_mapping bsm ON s.id = bsm.shelf_id "
-            f"WHERE bsm.book_id = {_book_id}"
+            f"JOIN users u ON u.id = s.user_id "
+            f"WHERE bsm.book_id = {_book_id} AND u.username = 'admin' "
+            f"AND LOWER(TRIM(s.name)) = 'want to read'"
         )
-        shelves = mariadb_query(q_shelf)
-
-        status = status_progress or status_book
-        want_to_read = False
-        detail_parts = []
-
-        if status:
-            detail_parts.append(f"read_status={status}")
-            if status.upper() in ("UNREAD", "WANT_TO_READ"):
-                want_to_read = True
-        if shelves:
-            detail_parts.append(f"shelves={shelves}")
-            shelves_lower = shelves.lower()
-            if "want" in shelves_lower and "read" in shelves_lower:
-                want_to_read = True
-            elif "to read" in shelves_lower or "to-read" in shelves_lower:
-                want_to_read = True
-
-        check("2. Book status is 'Want to Read'", 2, want_to_read,
-              "; ".join(detail_parts) if detail_parts else "no status or shelf found")
+        shelves = [line.strip() for line in mariadb_query(q_shelf).splitlines() if line.strip()]
+        check("2. Book is on admin's 'Want to Read' shelf", 2, bool(shelves),
+              f"shelves={shelves}" if shelves
+              else "book is not on admin's exact 'Want to Read' shelf")
     except Exception as e:
-        check("2. Book status is 'Want to Read'", 2, False, f"exception: {e}")
+        check("2. Book is on admin's 'Want to Read' shelf", 2, False,
+              f"exception: {e}")
 
 
 def check_3_reading_note_oral_traditions() -> None:
@@ -258,7 +237,7 @@ def check_4_siyuan_podcast_scripts_notebook() -> None:
         notebooks = resp.get("data", {}).get("notebooks", [])
         for nb in notebooks:
             name = nb.get("name", "")
-            if "podcast" in name.lower() and "script" in name.lower():
+            if name.strip().lower() == "podcast scripts":
                 _notebook_id = nb.get("id", "")
                 check("4. SiYuan 'Podcast Scripts' notebook exists", 2, True,
                       f"notebook_id={_notebook_id}, name='{name}'")
@@ -278,15 +257,13 @@ _doc_id: str | None = None
 def check_5_siyuan_doc_exists() -> None:
     global _doc_id
     try:
+        notebook_filter = f" AND box = '{_notebook_id}'" if _notebook_id else ""
         rows = siyuan_sql(
             "SELECT id, content, box FROM blocks "
-            "WHERE type = 'd' AND content LIKE '%EP-Research%Oral Traditions%'"
+            "WHERE type = 'd' "
+            "AND LOWER(TRIM(content)) = 'ep-research: oral traditions'"
+            + notebook_filter
         )
-        if not rows:
-            rows = siyuan_sql(
-                "SELECT id, content, box FROM blocks "
-                "WHERE type = 'd' AND content LIKE '%Oral Traditions%'"
-            )
 
         if rows:
             doc = rows[0]
@@ -371,38 +348,23 @@ def check_8_siyuan_hyperlink_to_booklore() -> None:
         full_md = " ".join(b.get("markdown", "") for b in (blocks or []))
 
         booklore_port = BOOKLORE_PORT
-        url_patterns = [
-            rf"https?://[^\s\)\"'>]+:{re.escape(booklore_port)}[^\s\)\"'>]*",
-            rf"https?://[^\s\)\"'>]*booklore[^\s\)\"'>]*",
-            rf"https?://[^\s\)\"'>]+/book/[^\s\)\"'>]*",
-            rf"https?://[^\s\)\"'>]+/books/[^\s\)\"'>]*",
-            rf"https?://[^\s\)\"'>]+/api/v1/books/[^\s\)\"'>]*",
+        all_urls = set(re.findall(r'https?://[^\s\)\">\'\]]+', full_md))
+        all_urls.update(url for _, url in re.findall(r'\[([^\]]*)\]\((https?://[^)]+)\)', full_md))
+        target_pattern = re.compile(
+            rf"/book/{re.escape(str(_book_id))}(?:[/?#]|$)"
+        )
+        target_urls = [
+            url for url in all_urls
+            if ("booklore" in url.lower() or f":{booklore_port}" in url)
+            and target_pattern.search(url)
         ]
-        all_urls = set()
-        for pat in url_patterns:
-            all_urls.update(re.findall(pat, full_md, re.IGNORECASE))
 
-        md_links = re.findall(r'\[([^\]]*)\]\(([^)]+)\)', full_md)
-        for text, url in md_links:
-            url_lower = url.lower()
-            if (f":{booklore_port}" in url or "booklore" in url_lower
-                    or "/book/" in url_lower or "/books/" in url_lower):
-                all_urls.add(url)
-
-        href_links = re.findall(r'href=["\']([^"\']+)["\']', full_md)
-        for url in href_links:
-            url_lower = url.lower()
-            if (f":{booklore_port}" in url or "booklore" in url_lower
-                    or "/book/" in url_lower or "/books/" in url_lower):
-                all_urls.add(url)
-
-        if all_urls:
+        if target_urls:
             check("8. SiYuan doc has hyperlink to Booklore entry", 3, True,
-                  f"found {len(all_urls)} link(s): {list(all_urls)[:3]}")
+                  f"target link: {target_urls[0]}")
         else:
-            any_links = re.findall(r'https?://[^\s\)\">\'\]]+', full_md)
             check("8. SiYuan doc has hyperlink to Booklore entry", 3, False,
-                  f"no Booklore links found; all URLs: {any_links[:5]}")
+                  f"no Booklore link points to book_id={_book_id}; URLs: {list(all_urls)[:5]}")
     except Exception as e:
         check("8. SiYuan doc has hyperlink to Booklore entry", 3, False,
               f"exception: {e}")

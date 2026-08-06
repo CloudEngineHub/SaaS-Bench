@@ -238,7 +238,8 @@ def build_verify_env(
 
 # -- Output parsing -----------------------------------------------------------
 _CHECK_RE = re.compile(
-    r"^\[(PASS|FAIL)\]\s+\((\d+)pt\)\s+(.+?)(?:\s{2,}\((.+)\))?\s*$"
+    r"^\[(PASS|FAIL)\]\s+\((\d+)pt\)\s+(.+?)(?:\s{2,}\((.+)\))?\s*$",
+    re.DOTALL,
 )
 _SCORE_RE = re.compile(
     r"^SCORE:\s*([\d.]+)\s+PASS:\s*(True|False)\s+\((\d+)/(\d+)\)"
@@ -253,8 +254,21 @@ def _parse_verify_output(stderr_text: str) -> dict:
     all_pass = False
     score_found = False
 
-    for line in stderr_text.splitlines():
-        line = line.strip()
+    lines = stderr_text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if line.startswith(("[PASS]", "[FAIL]")):
+            record = [line]
+            index += 1
+            while index < len(lines):
+                next_line = lines[index].strip()
+                if next_line.startswith(("[PASS]", "[FAIL]", "SCORE:")):
+                    break
+                record.append(next_line)
+                index += 1
+            line = "\n".join(record).strip()
+
         m = _CHECK_RE.match(line)
         if m:
             status, weight, label, detail = m.groups()
@@ -272,6 +286,7 @@ def _parse_verify_output(stderr_text: str) -> dict:
             earned     = int(m.group(3))
             total      = int(m.group(4))
             score_found = True
+        index += 1
 
     if not score_found and checks:
         total  = sum(c["weight"] for c in checks)

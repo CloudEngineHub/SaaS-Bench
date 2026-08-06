@@ -98,24 +98,12 @@ def check_1_input_log_on_plant_asset() -> None:
             "JOIN asset_field_data afd ON afd.id = la.asset_target_id "
             "WHERE lfd.type = 'input' "
             "AND afd.type = 'plant' "
-            "AND LOWER(afd.name) LIKE '%garlic%' "
+            "AND LOWER(TRIM(afd.name)) = 'certified garlic plot' "
             "ORDER BY lfd.id DESC LIMIT 1"
         )
         if not rows:
-            rows = farmos_sql(
-                "SELECT lfd.id, lfd.name "
-                "FROM log_field_data lfd "
-                "JOIN log__asset la ON la.entity_id = lfd.id "
-                "JOIN asset_field_data afd ON afd.id = la.asset_target_id "
-                "WHERE lfd.type = 'input' "
-                "AND (LOWER(afd.name) LIKE '%garlic%' "
-                "     OR LOWER(lfd.notes__value) LIKE '%garlic%' "
-                "     OR LOWER(lfd.name) LIKE '%neem%') "
-                "ORDER BY lfd.id DESC LIMIT 1"
-            )
-        if not rows:
             check("1. input_log_on_plant_asset", 2, False,
-                  "no input log linked to a garlic plant asset")
+                  "no input log linked to plant asset 'Certified Garlic Plot'")
             return
         _input_log_id = int(rows[0]["id"])
         _input_log_name = rows[0].get("name", "")
@@ -221,15 +209,16 @@ def check_6_input_log_equipment_ref() -> None:
         )
         if equip_rows:
             names = " ".join(r.get("name", "") for r in equip_rows).lower()
-            passed = "backpack sprayer" in names or "sprayer" in names
+            passed = any(
+                (r.get("name") or "").strip().lower() == "backpack sprayer #2"
+                for r in equip_rows
+            )
             check("6. input_log_equipment_ref", 2, passed,
                   f"equipment: {names}" if passed else f"equipment found but not sprayer: {names}")
             return
 
-        combined = (_input_log_notes + " " + _input_log_name).lower()
-        passed = "backpack sprayer" in combined or ("sprayer" in combined and "#2" in combined)
-        check("6. input_log_equipment_ref", 2, passed,
-              "" if passed else "no equipment reference to Backpack Sprayer #2")
+        check("6. input_log_equipment_ref", 2, False,
+              "input log is not linked to equipment asset 'Backpack Sprayer #2'")
     except Exception as e:
         check("6. input_log_equipment_ref", 2, False, f"exception: {e}")
 
@@ -245,17 +234,12 @@ def check_7_maintenance_log_on_equipment() -> None:
             "JOIN asset_field_data afd ON afd.id = la.asset_target_id "
             "WHERE lfd.type = 'maintenance' "
             "AND afd.type = 'equipment' "
+            "AND LOWER(TRIM(afd.name)) = 'backpack sprayer #2' "
             "ORDER BY lfd.id DESC LIMIT 1"
         )
         if not rows:
-            rows = farmos_sql(
-                "SELECT id, name FROM log_field_data "
-                "WHERE type = 'maintenance' "
-                "ORDER BY id DESC LIMIT 1"
-            )
-        if not rows:
             check("7. maintenance_log_on_equipment", 2, False,
-                  "no maintenance log found")
+                  "no maintenance log linked to 'Backpack Sprayer #2'")
             return
         _maint_log_id = int(rows[0]["id"])
         _maint_log_name = rows[0].get("name", "")
@@ -281,7 +265,10 @@ def check_8_maintenance_on_sprayer() -> None:
                   "maintenance log has no linked assets")
             return
         names = " ".join(r.get("name", "") for r in asset_rows).lower()
-        passed = "backpack sprayer" in names or "sprayer" in names
+        passed = any(
+            (r.get("name") or "").strip().lower() == "backpack sprayer #2"
+            for r in asset_rows
+        )
         check("8. maintenance_on_sprayer", 1, passed,
               f"assets: {names}" if passed else f"linked to wrong asset: {names}")
     except Exception as e:

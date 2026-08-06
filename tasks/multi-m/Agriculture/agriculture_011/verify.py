@@ -158,6 +158,7 @@ _obs_logs: list[dict] = []
 _input_logs: list[dict] = []
 _emergency_obs: dict | None = None
 _followup_obs: dict | None = None
+_treatment_input: dict | None = None
 
 
 # ── Log loader ────────────────────────────────────────────────────────────────
@@ -174,14 +175,45 @@ def _load_logs_for_corn_asset() -> None:
     )
     _obs_logs = [r for r in all_logs if r["type"] == "observation"]
     _input_logs = [r for r in all_logs if r["type"] == "input"]
+    _emergency_obs = None
+    _followup_obs = None
 
-    if len(_obs_logs) >= 2:
-        _emergency_obs = _obs_logs[0]
-        _followup_obs = _obs_logs[-1]
-        if int(_followup_obs["timestamp"]) <= int(_emergency_obs["timestamp"]):
-            _followup_obs = None
-    elif len(_obs_logs) == 1:
-        _emergency_obs = _obs_logs[0]
+
+def _log_text(log: dict) -> str:
+    return strip_html(
+        (log.get("notes__value") or "") + " " + (log.get("name") or "")
+    ).lower()
+
+
+def _select_followup_observation() -> dict | None:
+    """Select the task's follow-up, not an arbitrary first/last seeded log."""
+    if _emergency_obs is None:
+        return None
+    emergency_id = int(_emergency_obs["id"])
+    emergency_ts = int(_emergency_obs["timestamp"])
+    input_ts = int(_treatment_input["timestamp"]) if _treatment_input else emergency_ts
+    candidates = [
+        obs for obs in _obs_logs
+        if int(obs["id"]) != emergency_id
+        and int(obs["timestamp"]) >= input_ts
+        and int(obs["timestamp"]) > emergency_ts
+    ]
+    if not candidates:
+        return None
+
+    expected_ts = emergency_ts + 7 * 86400
+
+    def rank(obs: dict) -> tuple[int, int]:
+        text = _log_text(obs)
+        has_reduction = any(value in text for value in ["70%", "70 %", "seventy percent"])
+        has_monitoring = any(value in text for value in [
+            "monitor", "continu", "watch", "follow", "re-appl", "reappl",
+            "inspect", "7 day", "7-day", "one week", "1 week", "observe",
+        ])
+        return (0 if has_reduction and has_monitoring else 1,
+                abs(int(obs["timestamp"]) - expected_ts))
+
+    return min(candidates, key=rank)
 
 
 # ── Individual checks ─────────────────────────────────────────────────────────
@@ -199,8 +231,7 @@ def check_1_corn_plant_asset_exists() -> None:
         rows = php_query(
             "SELECT id, name, type FROM asset_field_data "
             "WHERE type = 'plant' "
-            "AND (LOWER(name) LIKE '%corn%' OR LOWER(name) LIKE '%maize%' "
-            "OR name LIKE '%玉米%') "
+            "AND LOWER(TRIM(name)) = '2023 sweet corn planting 1' "
             "ORDER BY id DESC"
         )
         if rows:
@@ -209,7 +240,7 @@ def check_1_corn_plant_asset_exists() -> None:
                   f"found: id={_corn_asset_id} name='{rows[0]['name']}'")
         else:
             check("1. corn_plant_asset_exists", 1, False,
-                  "no plant asset matching corn/maize/玉米")
+                  "plant asset '2023 Sweet Corn Planting 1' not found")
     except Exception as e:
         check("1. corn_plant_asset_exists", 1, False, f"exception: {e}")
 
@@ -226,25 +257,20 @@ def check_2_emergency_observation_log() -> None:
                   "no observation logs on corn asset")
             return
 
-        best = None
+        candidates = []
         for obs in _obs_logs:
-            combined = strip_html(
-                (obs.get("notes__value") or "") + " " + (obs.get("name") or "")
-            ).lower()
+            combined = _log_text(obs)
             if "high" in combined and any(
                 kw in combined for kw in ["aphid", "pest", "infestation", "insect", "bug"]
             ):
-                best = obs
-                break
+                candidates.append(obs)
 
-        if best is None:
-            for obs in _obs_logs:
-                combined = strip_html(
-                    (obs.get("notes__value") or "") + " " + (obs.get("name") or "")
-                ).lower()
-                if "high" in combined:
-                    best = obs
-                    break
+        def emergency_rank(obs: dict) -> tuple[int, int]:
+            text = _log_text(obs)
+            evidence_terms = ["emergency", "dense", "tassel", "leaf sheath", "shed skin"]
+            return (sum(term in text for term in evidence_terms), int(obs["timestamp"]))
+
+        best = max(candidates, key=emergency_rank) if candidates else None
 
         if best:
             _emergency_obs = best
@@ -292,6 +318,7 @@ def check_3_observation_photo_attached() -> None:
 
 def check_4_input_log_pyrethrin_omri() -> None:
     """Input log notes contain both 'Pyrethrin' and 'OMRI-2023-PY-001'."""
+    global _treatment_input
     try:
         if _corn_asset_id is None:
             check("4. input_log_pyrethrin_omri", 2, False, "corn asset not found")
@@ -299,15 +326,22 @@ def check_4_input_log_pyrethrin_omri() -> None:
         if not _input_logs:
             check("4. input_log_pyrethrin_omri", 2, False, "no input logs on corn asset")
             return
+        candidates = []
         for inp in _input_logs:
-            notes = strip_html(
-                (inp.get("notes__value") or "") + " " + (inp.get("name") or "")
-            ).lower()
+            notes = _log_text(inp)
             has_pyrethrin = "pyrethrin" in notes
             has_cert = "omri-2023-py-001" in notes or "omri 2023 py 001" in notes
             if has_pyrethrin and has_cert:
-                check("4. input_log_pyrethrin_omri", 2, True)
-                return
+                candidates.append(inp)
+        if candidates:
+            def treatment_rank(inp: dict) -> tuple[int, int]:
+                text = _log_text(inp)
+                detail_terms = ["200", "ml", "li shifu", "tractor-mounted boom sprayer"]
+                return (sum(term in text for term in detail_terms), int(inp["timestamp"]))
+
+            _treatment_input = max(candidates, key=treatment_rank)
+            check("4. input_log_pyrethrin_omri", 2, True)
+            return
         missing = []
         any_pyrethrin = any("pyrethrin" in strip_html(
             (i.get("notes__value") or "") + " " + (i.get("name") or "")
@@ -328,44 +362,29 @@ def check_4_input_log_pyrethrin_omri() -> None:
 def check_5_input_log_details() -> None:
     """Input log notes contain 200 mL/acre, Li Shifu, Tractor-Mounted Boom Sprayer."""
     try:
-        if not _input_logs:
+        if not _treatment_input:
             check("5. input_log_details", 2, False, "no input logs on corn asset")
             return
-        found_rate = False
-        found_operator = False
-        found_sprayer = False
-        for inp in _input_logs:
-            notes = strip_html(
-                (inp.get("notes__value") or "") + " " + (inp.get("name") or "")
-            ).lower()
-            if "200" in notes and ("ml" in notes or "milliliter" in notes):
-                found_rate = True
-            if "li shifu" in notes or "li_shifu" in notes:
-                found_operator = True
-            if "boom sprayer" in notes or "tractor-mounted" in notes:
-                found_sprayer = True
+        inp = _treatment_input
+        notes = strip_html(
+            (inp.get("notes__value") or "") + " " + (inp.get("name") or "")
+        ).lower()
+        found_rate = "200" in notes and ("ml" in notes or "milliliter" in notes)
+        found_operator = "li shifu" in notes or "li_shifu" in notes
+        found_sprayer = "tractor-mounted boom sprayer" in notes
 
         if not found_operator:
-            for inp in _input_logs:
-                try:
-                    owner_rows = php_query(
-                        f"SELECT owner_target_id FROM log__owner "
-                        f"WHERE entity_id = {inp['id']} AND deleted = 0"
-                    )
-                    for ow in owner_rows:
-                        user_rows = php_query(
-                            f"SELECT name FROM users_field_data "
-                            f"WHERE uid = {ow['owner_target_id']}"
-                        )
-                        for u in user_rows:
-                            if "li shifu" in (u.get("name") or "").lower():
-                                found_operator = True
-                                break
-                        if found_operator:
-                            break
-                except Exception:
-                    continue
-                if found_operator:
+            owner_rows = php_query(
+                f"SELECT owner_target_id FROM log__owner "
+                f"WHERE entity_id = {inp['id']} AND deleted = 0"
+            )
+            for ow in owner_rows:
+                user_rows = php_query(
+                    f"SELECT name FROM users_field_data "
+                    f"WHERE uid = {ow['owner_target_id']}"
+                )
+                if any("li shifu" in (u.get("name") or "").lower() for u in user_rows):
+                    found_operator = True
                     break
 
         missing = []
@@ -388,23 +407,24 @@ def check_6_log_chronological_order() -> None:
         if _corn_asset_id is None:
             check("6. log_chronological_order", 2, False, "corn asset not found")
             return
-        has_obs = len(_obs_logs) >= 2
-        has_input = len(_input_logs) >= 1
-        if not has_obs or not has_input:
+        followup = _select_followup_observation()
+        has_emergency = _emergency_obs is not None
+        has_input = _treatment_input is not None
+        if not has_emergency or not has_input or followup is None:
             detail_parts = []
-            if not has_obs:
-                detail_parts.append(f"need >=2 observation logs, found {len(_obs_logs)}")
+            if not has_emergency:
+                detail_parts.append("emergency observation not found")
             if not has_input:
-                detail_parts.append("need >=1 input log")
+                detail_parts.append("treatment input log not found")
+            if followup is None:
+                detail_parts.append("follow-up observation not found")
             check("6. log_chronological_order", 2, False, "; ".join(detail_parts))
             return
 
-        obs1_ts = int(_obs_logs[0]["timestamp"])
-        inp_ts = int(_input_logs[0]["timestamp"])
-        obs2_ts = int(_obs_logs[-1]["timestamp"])
+        obs1_ts = int(_emergency_obs["timestamp"])
+        inp_ts = int(_treatment_input["timestamp"])
+        obs2_ts = int(followup["timestamp"])
         order_ok = obs1_ts <= inp_ts <= obs2_ts
-        if not order_ok:
-            order_ok = obs1_ts <= inp_ts and obs2_ts > obs1_ts
         check("6. log_chronological_order", 2, order_ok,
               "" if order_ok else
               f"expected Obs1({obs1_ts}) <= Input({inp_ts}) <= Obs2({obs2_ts})")
@@ -416,21 +436,22 @@ def check_7_followup_dated_7_days() -> None:
     """Follow-up Observation is dated ~7 days after emergency observation (±2 day tolerance)."""
     global _followup_obs
     try:
-        if len(_obs_logs) < 2:
+        if _emergency_obs is None:
             check("7. followup_dated_7_days", 2, False,
-                  f"need >=2 observation logs, found {len(_obs_logs)}")
+                  "emergency observation not found")
             return
-        obs1_ts = int(_obs_logs[0]["timestamp"])
-        obs2_ts = int(_obs_logs[-1]["timestamp"])
-        if obs2_ts <= obs1_ts:
+        candidate = _select_followup_observation()
+        if candidate is None:
             check("7. followup_dated_7_days", 2, False,
-                  "follow-up observation not after emergency observation")
+                  "no follow-up observation after the emergency/treatment logs")
             return
+        obs1_ts = int(_emergency_obs["timestamp"])
+        obs2_ts = int(candidate["timestamp"])
         expected_ts = obs1_ts + 7 * 86400
         diff = abs(obs2_ts - expected_ts)
         tolerance = 2 * 86400
         if diff <= tolerance:
-            _followup_obs = _obs_logs[-1]
+            _followup_obs = candidate
             actual_days = (obs2_ts - obs1_ts) / 86400
             check("7. followup_dated_7_days", 2, True, f"{actual_days:.1f} days apart")
         else:
@@ -444,7 +465,7 @@ def check_7_followup_dated_7_days() -> None:
 def check_8_followup_reduction_notes() -> None:
     """Follow-up Observation notes mention ~70% reduction and continued monitoring."""
     try:
-        target = _followup_obs or (_obs_logs[-1] if len(_obs_logs) >= 2 else None)
+        target = _followup_obs or _select_followup_observation()
         if target is None:
             check("8. followup_reduction_notes", 2, False, "follow-up observation not found")
             return
@@ -452,8 +473,7 @@ def check_8_followup_reduction_notes() -> None:
             (target.get("notes__value") or "") + " " + (target.get("name") or "")
         ).lower()
         has_reduction = any(kw in notes for kw in [
-            "70%", "70 %", "seventy", "reduc", "decreas", "declined",
-            "improved", "lower", "fewer",
+            "70%", "70 %", "seventy percent",
         ])
         has_monitoring = any(kw in notes for kw in [
             "monitor", "continu", "watch", "follow", "re-appl", "reappl",
@@ -477,35 +497,12 @@ def check_9_equipment_maintenance_log() -> None:
         rows = php_query(
             "SELECT id, name FROM asset_field_data "
             "WHERE type = 'equipment' "
-            "AND (LOWER(name) LIKE '%boom sprayer%' "
-            "OR LOWER(name) LIKE '%tractor-mounted%') "
-            "LIMIT 5"
+            "AND LOWER(TRIM(name)) = 'tractor-mounted boom sprayer' "
+            "LIMIT 1"
         )
         if not rows:
-            rows = php_query(
-                "SELECT id, name FROM asset_field_data "
-                "WHERE type = 'equipment' AND LOWER(name) LIKE '%sprayer%' "
-                "LIMIT 5"
-            )
-        if not rows:
-            maint_rows = php_query(
-                "SELECT l.id, l.name, l.notes__value FROM log_field_data l "
-                "WHERE l.type = 'maintenance' "
-                "AND (LOWER(l.notes__value) LIKE '%sprayer%' "
-                "OR LOWER(l.name) LIKE '%sprayer%') "
-                "ORDER BY l.timestamp DESC LIMIT 3"
-            )
-            if maint_rows:
-                notes = strip_html(maint_rows[0].get("notes__value") or "").lower()
-                has_cleaning = any(kw in notes for kw in [
-                    "clean", "rinse", "wash", "decontam", "water",
-                ])
-                check("9. equipment_maintenance_log", 2, has_cleaning,
-                      "maintenance log found via notes (no exact equipment asset)" if has_cleaning
-                      else "maintenance log found but no cleaning/rinse mentioned")
-            else:
-                check("9. equipment_maintenance_log", 2, False,
-                      "no equipment asset matching 'Power Sprayer' and no maintenance log")
+            check("9. equipment_maintenance_log", 2, False,
+                  "equipment asset 'Tractor-Mounted Boom Sprayer' not found")
             return
 
         equip_id = int(rows[0]["id"])
@@ -527,11 +524,19 @@ def check_9_equipment_maintenance_log() -> None:
                 "AND l.type = 'maintenance' "
                 "ORDER BY l.id DESC LIMIT 5"
             )
-        if maint_rows:
-            check("9. equipment_maintenance_log", 2, True, f"equipment='{equip_name}'")
+        cleaning_logs = []
+        for log in maint_rows:
+            text = strip_html(
+                (log.get("name") or "") + " " + (log.get("notes__value") or "")
+            ).lower()
+            if "water" in text and any(k in text for k in ["clean", "rinse", "wash"]):
+                cleaning_logs.append(log)
+        if cleaning_logs:
+            check("9. equipment_maintenance_log", 2, True,
+                  f"equipment='{equip_name}', cleaning_log={cleaning_logs[0]['id']}")
         else:
             check("9. equipment_maintenance_log", 2, False,
-                  f"no maintenance log on equipment '{equip_name}' (id={equip_id})")
+                  f"no water-cleaning maintenance log on equipment '{equip_name}'")
     except Exception as e:
         check("9. equipment_maintenance_log", 2, False, f"exception: {e}")
 

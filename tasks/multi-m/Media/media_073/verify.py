@@ -429,10 +429,6 @@ def check_8_siyuan_bidirectional_link() -> None:
         has_backward = len(backward) > 0
         if has_forward and has_backward:
             check("8. siyuan_bidirectional_link", 3, True, "refs exist in both directions")
-        elif has_forward or has_backward:
-            direction = "animation->genre" if has_forward else "genre->animation"
-            check("8. siyuan_bidirectional_link", 3, True,
-                  f"ref {direction} found; SiYuan auto-generates the backlink view")
         else:
             anim_blocks = siyuan_sql(
                 f"SELECT markdown FROM blocks WHERE root_id='{_animation_doc_root_id}' "

@@ -54,6 +54,7 @@ INPUT_FILES: list[str] = [
 # Facts about the input paper (siyuan_paper_001.pdf)
 PAPER_TITLE = "Collaborative Knowledge Creation and Management in Information Retrieval"
 PAPER_AUTHOR_SURNAMES = ["odumuyiwa", "david"]
+SIYUAN_DOC_TITLE = f"Paper Digest: {PAPER_TITLE}"
 
 # ── Result accumulator ────────────────────────────────────────────────────────
 _checks: list[tuple[str, int, bool, str]] = []
@@ -274,30 +275,17 @@ def _find_doc() -> str | None:
     if _doc_id_searched:
         return _doc_id
     _doc_id_searched = True
+    nb_id = _find_notebook_id()
+    if not nb_id:
+        return None
+    escaped_title = SIYUAN_DOC_TITLE.replace("'", "''")
     rows = siyuan_sql(
         "SELECT id, content, box FROM blocks "
-        "WHERE type = 'd' AND content LIKE '%Paper Digest%Collaborative Knowledge Creation%' "
-        "LIMIT 10"
+        f"WHERE type = 'd' AND LOWER(TRIM(content)) = LOWER('{escaped_title}') "
+        f"AND box = '{nb_id}' LIMIT 1"
     )
-    nb_id = _find_notebook_id()
-    for row in rows:
-        if nb_id and row.get("box") == nb_id:
-            _doc_id = row["id"]
-            return _doc_id
     if rows:
         _doc_id = rows[0]["id"]
-        return _doc_id
-    rows2 = siyuan_sql(
-        "SELECT id, content, box FROM blocks "
-        "WHERE type = 'd' AND content LIKE '%Paper Digest%' "
-        "LIMIT 10"
-    )
-    if rows2:
-        for row in rows2:
-            if nb_id and row.get("box") == nb_id:
-                _doc_id = row["id"]
-                return _doc_id
-        _doc_id = rows2[0]["id"]
         return _doc_id
     return None
 
@@ -322,13 +310,8 @@ def _get_doc_blocks() -> list[dict]:
 
 
 def _get_full_doc_text() -> str:
-    blocks = _get_doc_blocks()
-    parts = []
-    for b in blocks:
-        text = b.get("markdown") or b.get("content") or ""
-        if text.strip():
-            parts.append(text.strip())
-    return "\n".join(parts)
+    doc_id = _find_doc()
+    return siyuan_export_md(doc_id) if doc_id else ""
 
 
 def _get_intro_text() -> str:
@@ -371,20 +354,8 @@ def _get_intro_text() -> str:
 
 
 def _count_numbered_items(doc_id: str) -> int:
-    full_md = _get_full_doc_text()
-    items = re.findall(r'^\s*\d{1,2}[\.\)、]\s+\S', full_md, re.MULTILINE)
-    n_regex = len(items)
-    try:
-        rows = siyuan_sql(
-            f"SELECT COUNT(*) AS c FROM blocks "
-            f"WHERE root_id = '{doc_id}' AND type = 'i' AND parent_id IN "
-            f"(SELECT id FROM blocks WHERE root_id = '{doc_id}' "
-            f"AND type = 'l' AND subtype = 'o')"
-        )
-        n_sql = int(rows[0].get("c", 0)) if rows else 0
-    except Exception:
-        n_sql = 0
-    return max(n_regex, n_sql)
+    full_md = siyuan_export_md(doc_id)
+    return len(re.findall(r'^\s*\d{1,2}[\.\)、]\s+\S', full_md, re.MULTILINE))
 
 
 # ── Individual checks ─────────────────────────────────────────────────────────
@@ -428,7 +399,7 @@ def check_2_booklore_author_correct() -> None:
             f"WHERE m.book_id = {book_id}"
         )
         authors_l = authors.lower()
-        passed = any(s in authors_l for s in PAPER_AUTHOR_SURNAMES)
+        passed = all(s in authors_l for s in PAPER_AUTHOR_SURNAMES)
         check("2. booklore_author_correct", 2, passed,
               "" if passed else
               f"authors found: '{authors}', expected Victor Odumuyiwa / Amos David")
@@ -445,13 +416,14 @@ def check_3_booklore_research_shelf() -> None:
         shelves = mariadb_query(
             f"SELECT s.name FROM shelf s "
             f"JOIN book_shelf_mapping bsm ON s.id = bsm.shelf_id "
-            f"WHERE bsm.book_id = {book_id}"
+            f"JOIN users u ON u.id = s.user_id "
+            f"WHERE bsm.book_id = {book_id} AND u.username = 'admin'"
         )
         names = [n.strip() for n in shelves.splitlines() if n.strip()]
         passed = any(n.lower() == "research" for n in names)
         check("3. booklore_research_shelf", 2, passed,
               "" if passed else
-              f"book shelves: {names}, expected a shelf named 'Research'")
+              f"admin book shelves: {names}, expected a shelf named 'Research'")
     except Exception as e:
         check("3. booklore_research_shelf", 2, False, f"exception: {e}")
 
@@ -515,19 +487,10 @@ def check_5_booklore_notes_quality() -> None:
 def check_6_siyuan_doc_exists() -> None:
     try:
         doc_id = _find_doc()
-        passed = doc_id is not None
-        detail = ""
-        if passed:
-            nb_id = _find_notebook_id()
-            rows = siyuan_sql(
-                f"SELECT box FROM blocks WHERE id = '{doc_id}' AND type = 'd' LIMIT 1"
-            )
-            if nb_id and rows and rows[0].get("box") != nb_id:
-                detail = "document found but not in 'Podcast Scripts' notebook"
-            elif not nb_id:
-                detail = "document found but no 'Podcast Scripts' notebook exists"
-        else:
-            detail = "no document matching 'Paper Digest: <paper title>' found"
+        passed = doc_id is not None and _find_notebook_id() is not None
+        detail = "" if passed else (
+            f"no exact '{SIYUAN_DOC_TITLE}' document in 'Podcast Scripts' notebook"
+        )
         check("6. siyuan_doc_exists", 2, passed, detail)
     except Exception as e:
         check("6. siyuan_doc_exists", 2, False, f"exception: {e}")
@@ -596,19 +559,20 @@ def check_10_siyuan_booklore_url() -> None:
         return
     try:
         full_md = _get_full_doc_text()
-        urls = re.findall(r'https?://[^\s)\]>"\']+', full_md)
-        has_booklore = any("booklore" in u.lower() for u in urls)
-        if not has_booklore and BOOKLORE_PORT:
-            has_booklore = any(f":{BOOKLORE_PORT}" in u for u in urls)
-        if not has_booklore:
-            has_booklore = any(
-                re.search(r"/(book|library|shelf)", u, re.IGNORECASE) for u in urls
-            )
-        if not has_booklore and urls and "booklore" in full_md.lower():
-            has_booklore = True
-        check("10. siyuan_booklore_url", 2, has_booklore,
-              "" if has_booklore else
-              f"found {len(urls)} URLs, none recognizable as a Booklore book entry")
+        urls = set(re.findall(r'https?://[^\s)\]>"\']+', full_md))
+        urls.update(url for _, url in re.findall(r'\[([^\]]*)\]\((https?://[^)]+)\)', full_md))
+        book_id = _find_book_id()
+        target_pattern = re.compile(
+            rf"/book/{re.escape(str(book_id))}(?:[/?#]|$)"
+        )
+        matching = [
+            url for url in urls
+            if ("booklore" in url.lower() or f":{BOOKLORE_PORT}" in url)
+            and target_pattern.search(url)
+        ] if book_id else []
+        check("10. siyuan_booklore_url", 2, bool(matching),
+              f"target link: {matching[0]}" if matching else
+              f"found {len(urls)} URLs, none points to Booklore book_id={book_id}")
     except Exception as e:
         check("10. siyuan_booklore_url", 2, False, f"exception: {e}")
 

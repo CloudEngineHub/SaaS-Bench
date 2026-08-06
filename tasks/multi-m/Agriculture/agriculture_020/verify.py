@@ -38,11 +38,14 @@ RECIPYA_DB = "/root/.config/Recipya/Database/recipya.db"
 
 RECIPE_NAME = "Layered Zucchini Casserole"
 
-RECIPE_VEGETABLES = [
-    "aubergine", "eggplant", "courgette", "zucchini",
-    "bell pepper", "pepper", "capsicum",
-    "tomato", "onion", "garlic", "mushroom",
-]
+TARGET_VEGETABLES = {
+    "zucchini": ("zucchini", "courgette"),
+    "eggplant": ("eggplant", "aubergine"),
+    "onion": ("onion",),
+    "mushrooms": ("mushroom",),
+    "fresh tomatoes": ("tomato",),
+}
+TARGET_STOCK = 5.0
 
 # ── Result accumulator ────────────────────────────────────────────────────────
 _checks: list[tuple[str, int, bool, str]] = []
@@ -143,9 +146,17 @@ def llm_judge(content: str, condition: str, timeout: int = 30) -> tuple[bool, st
         return False, f"llm_judge error: {e}"
 
 
-def _is_veggie_keyword(name: str) -> bool:
+def _target_vegetable(name: str) -> str | None:
     name_lower = name.lower()
-    return any(v in name_lower for v in RECIPE_VEGETABLES)
+    for target, aliases in TARGET_VEGETABLES.items():
+        if any(alias in name_lower for alias in aliases):
+            if target == "fresh tomatoes" and any(word in name_lower for word in [
+                "sauce", "paste", "juice", "soup", "stewed", "diced", "canned",
+                "ketchup",
+            ]):
+                continue
+            return target
+    return None
 
 
 # ── Shared state ──────────────────────────────────────────────────────────────
@@ -153,6 +164,36 @@ _recipya_recipe_id: int = -1
 _recipya_recipe_name: str = ""
 _recipya_ingredients: list[str] = []
 _bistrot_shopping_items: list[dict] = []
+_stock_by_target: dict[str, float] = {}
+
+
+def _load_stock_by_target() -> dict[str, float]:
+    global _stock_by_target
+    if _stock_by_target:
+        return _stock_by_target
+    rows = grocy_query(
+        "SELECT p.id, p.name, COALESCE(sc.amount, 0) AS amount "
+        "FROM products p LEFT JOIN stock_current sc ON sc.product_id = p.id"
+    )
+    _stock_by_target = {target: 0.0 for target in TARGET_VEGETABLES}
+    for row in rows:
+        target = _target_vegetable(row.get("name") or "")
+        if not target:
+            continue
+        try:
+            amount = float(row.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        _stock_by_target[target] = max(_stock_by_target[target], amount)
+    return _stock_by_target
+
+
+def _expected_deficits() -> dict[str, float]:
+    return {
+        target: TARGET_STOCK - amount
+        for target, amount in _load_stock_by_target().items()
+        if amount < TARGET_STOCK
+    }
 
 
 # ── Individual checks ─────────────────────────────────────────────────────────
@@ -164,7 +205,9 @@ def check_1_recipya_recipe_exists() -> None:
         rows = recipya_query(
             "SELECT r.id, r.name FROM recipes r "
             "JOIN user_recipe ur ON ur.recipe_id = r.id "
+            "JOIN users u ON u.id = ur.user_id "
             "WHERE LOWER(TRIM(r.name)) = 'layered zucchini casserole' "
+            "AND LOWER(u.email) = 'admin@recipya.com' "
             "ORDER BY r.id DESC LIMIT 1;"
         )
         if rows:
@@ -181,11 +224,11 @@ def check_1_recipya_recipe_exists() -> None:
 
 
 def check_2_recipya_vegetable_ingredients() -> None:
-    """The Recipya casserole recipe has >=3 vegetable ingredients."""
+    """The Recipya casserole recipe contains all five named vegetables."""
     global _recipya_ingredients
     try:
         if _recipya_recipe_id < 0:
-            check("2. recipya_vegetable_ingredients", 1, False, "no recipe from check 1")
+            check("2. recipya_vegetable_ingredients", 2, False, "no recipe from check 1")
             return
         rows = recipya_query(
             f"SELECT i.name FROM ingredient_recipe ir "
@@ -194,17 +237,18 @@ def check_2_recipya_vegetable_ingredients() -> None:
             f"ORDER BY ir.ingredient_order;"
         )
         _recipya_ingredients = [r["name"] for r in rows]
-        veggie_matches = [i for i in _recipya_ingredients if _is_veggie_keyword(i)]
-        count = len(veggie_matches)
-        check("2. recipya_vegetable_ingredients", 1, count >= 3,
-              f"{count} veggie ingredients: {', '.join(veggie_matches[:6])}; "
-              f"all ({len(_recipya_ingredients)}): {', '.join(_recipya_ingredients[:8])}")
+        found = {_target_vegetable(i) for i in _recipya_ingredients}
+        found.discard(None)
+        missing = sorted(set(TARGET_VEGETABLES) - found)
+        check("2. recipya_vegetable_ingredients", 2, not missing,
+              f"all five vegetables found: {', '.join(sorted(found))}"
+              if not missing else f"missing recipe vegetables: {', '.join(missing)}")
     except Exception as e:
-        check("2. recipya_vegetable_ingredients", 1, False, f"exception: {e}")
+        check("2. recipya_vegetable_ingredients", 2, False, f"exception: {e}")
 
 
 def check_3_grocy_shopping_list_has_bistrot_items() -> None:
-    """Grocy shopping list has >=1 item with note containing 'Bistrot Provençal menu expansion'."""
+    """The exact set of deficient vegetables is present on the shopping list."""
     global _bistrot_shopping_items
     try:
         rows = grocy_query(
@@ -218,19 +262,20 @@ def check_3_grocy_shopping_list_has_bistrot_items() -> None:
             if "bistrot" in note.lower() and ("menu expansion" in note.lower()):
                 _bistrot_shopping_items.append(item)
 
-        if _bistrot_shopping_items:
-            previews = [
-                f"{m.get('product_name') or '(no product)'}: qty={m.get('amount')}"
-                for m in _bistrot_shopping_items[:4]
-            ]
-            check("3. grocy_shopping_list_bistrot_items", 2, True,
-                  f"{len(_bistrot_shopping_items)} item(s): {'; '.join(previews)}")
-        else:
-            check("3. grocy_shopping_list_bistrot_items", 2, False,
-                  f"no shopping list item with 'Bistrot Provençal menu expansion' "
-                  f"({len(rows)} total items)")
+        expected = set(_expected_deficits())
+        actual = {
+            target for item in _bistrot_shopping_items
+            if (target := _target_vegetable(item.get("product_name") or ""))
+        }
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        passed = bool(expected) and not missing and not extra
+        detail = f"expected deficient={sorted(expected)}, listed={sorted(actual)}"
+        if not expected:
+            detail = "seed has no deficient target vegetables; task has no shopping action"
+        check("3. grocy_shopping_list_bistrot_items", 3, passed, detail)
     except Exception as e:
-        check("3. grocy_shopping_list_bistrot_items", 2, False, f"exception: {e}")
+        check("3. grocy_shopping_list_bistrot_items", 3, False, f"exception: {e}")
 
 
 def check_4_bistrot_note_exact_text() -> None:
@@ -243,10 +288,8 @@ def check_4_bistrot_note_exact_text() -> None:
         bad = []
         for item in _bistrot_shopping_items:
             note = (item.get("note") or "").strip()
-            if exact_target not in note.lower():
-                alt = note.lower().replace("provencal", "provençal")
-                if exact_target not in alt:
-                    bad.append(f"id={item['id']} note='{note[:60]}'")
+            if note.lower() != exact_target:
+                bad.append(f"id={item['id']} note='{note[:60]}'")
         if bad:
             check("4. bistrot_note_exact_text", 1, False,
                   f"{len(bad)} item(s) with inexact note: {'; '.join(bad[:3])}")
@@ -269,9 +312,12 @@ def check_5_shopping_items_are_vegetables() -> None:
             note = item.get("note") or ""
             item_names.append(name if name else note[:40])
 
-        veggie_count = sum(1 for n in item_names if _is_veggie_keyword(n))
+        veggie_count = sum(1 for n in item_names if _target_vegetable(n))
         total = len(item_names)
-        passed = veggie_count >= 1 and veggie_count >= total * 0.5
+        expected = set(_expected_deficits())
+        actual = {_target_vegetable(n) for n in item_names}
+        actual.discard(None)
+        passed = veggie_count == total and actual == expected
         check("5. shopping_items_are_vegetables", 2, passed,
               f"{veggie_count}/{total} items are casserole vegetables: "
               f"{', '.join(item_names[:6])}")
@@ -283,100 +329,88 @@ def check_6_adequately_stocked_not_on_list() -> None:
     """Ingredients with stock >= 500g or >= 5 units should NOT be on the bistrot shopping list."""
     try:
         if not _bistrot_shopping_items:
-            check("6. adequately_stocked_not_on_list", 2, False,
+            check("6. adequately_stocked_not_on_list", 1, False,
                   "no bistrot items from check 3")
             return
 
-        stocked = grocy_query(
-            "SELECT sc.product_id, sc.amount, p.name "
-            "FROM stock_current sc "
-            "JOIN products p ON sc.product_id = p.id "
-            "WHERE sc.amount >= 5"
-        )
-        well_stocked_ids = {str(s["product_id"]) for s in stocked}
-        well_stocked_names = {(s.get("name") or "").lower() for s in stocked}
-
+        stock = _load_stock_by_target()
         violations = []
         for item in _bistrot_shopping_items:
-            pid = str(item.get("product_id") or "")
-            pname = (item.get("product_name") or "").lower()
-            if pid in well_stocked_ids or pname in well_stocked_names:
-                matching_stock = [s for s in stocked
-                                  if str(s["product_id"]) == pid
-                                  or (s.get("name") or "").lower() == pname]
-                stock_amt = matching_stock[0]["amount"] if matching_stock else "?"
-                violations.append(
-                    f"{item.get('product_name', '?')} (stock={stock_amt})")
+            target = _target_vegetable(item.get("product_name") or "")
+            if target and stock[target] >= TARGET_STOCK:
+                violations.append(f"{target} (stock={stock[target]})")
 
         if violations:
-            check("6. adequately_stocked_not_on_list", 2, False,
+            check("6. adequately_stocked_not_on_list", 1, False,
                   f"{len(violations)} over-stocked item(s) on list: "
                   f"{'; '.join(violations[:3])}")
         else:
-            check("6. adequately_stocked_not_on_list", 2, True,
+            check("6. adequately_stocked_not_on_list", 1, True,
                   f"no well-stocked items wrongly added to shopping list")
     except Exception as e:
-        check("6. adequately_stocked_not_on_list", 2, False, f"exception: {e}")
+        check("6. adequately_stocked_not_on_list", 1, False, f"exception: {e}")
 
 
 def check_7_shopping_amounts_reasonable() -> None:
-    """Shopping list quantities are positive and reasonable (non-zero amount)."""
+    """Shopping quantities exactly fill each vegetable's stock deficit."""
     try:
         if not _bistrot_shopping_items:
-            check("7. shopping_amounts_reasonable", 1, False,
+            check("7. shopping_amounts_reasonable", 2, False,
                   "no bistrot items from check 3")
             return
-        bad = []
+        deficits = _expected_deficits()
+        amounts: dict[str, float] = {}
         for item in _bistrot_shopping_items:
             amt = float(item.get("amount") or 0)
-            if amt <= 0:
-                bad.append(f"{item.get('product_name', '?')}: amt={amt}")
+            target = _target_vegetable(item.get("product_name") or "")
+            if target:
+                amounts[target] = amounts.get(target, 0.0) + amt
+
+        bad = []
+        for target, needed in deficits.items():
+            listed = amounts.get(target, 0.0)
+            if abs(listed - needed) > 1e-6:
+                bad.append(f"{target}: listed={listed:g}, required={needed:g}")
 
         if bad:
-            check("7. shopping_amounts_reasonable", 1, False,
-                  f"{len(bad)} item(s) with zero/negative amount: {'; '.join(bad)}")
+            check("7. shopping_amounts_reasonable", 2, False,
+                  f"quantities do not match deficits: {'; '.join(bad)}")
         else:
             previews = [
                 f"{it.get('product_name','?')}={it.get('amount')}"
                 for it in _bistrot_shopping_items[:4]
             ]
-            check("7. shopping_amounts_reasonable", 1, True,
-                  f"all amounts positive: {'; '.join(previews)}")
+            check("7. shopping_amounts_reasonable", 2, True,
+                  f"listed amounts satisfy stock deficits: {'; '.join(previews)}")
     except Exception as e:
-        check("7. shopping_amounts_reasonable", 1, False, f"exception: {e}")
+        check("7. shopping_amounts_reasonable", 2, False, f"exception: {e}")
 
 
 def check_8_cross_app_ingredients_match() -> None:
-    """LLM judge: Grocy shopping list items correspond to ingredients in the Recipya ratatouille recipe."""
+    """Every listed vegetable is present in the logged-in user's Recipya recipe."""
     try:
         if not _bistrot_shopping_items:
-            check("8. cross_app_ingredients_match", 3, False,
+            check("8. cross_app_ingredients_match", 1, False,
                   "no bistrot items from check 3")
             return
         if not _recipya_ingredients:
-            check("8. cross_app_ingredients_match", 3, False,
+            check("8. cross_app_ingredients_match", 1, False,
                   "no recipya ingredients from check 2")
             return
 
-        shopping_names = [
-            item.get("product_name") or item.get("note", "unknown")
+        recipe_targets = {_target_vegetable(i) for i in _recipya_ingredients}
+        recipe_targets.discard(None)
+        listed_targets = {
+            _target_vegetable(item.get("product_name") or "")
             for item in _bistrot_shopping_items
-        ]
-        content = (
-            f"Recipya ratatouille recipe ingredients: {', '.join(_recipya_ingredients)}\n\n"
-            f"Grocy shopping list items added for the restaurant: {', '.join(shopping_names)}"
-        )
-        condition = (
-            "The items added to the Grocy shopping list correspond semantically to "
-            "ingredients required by the Ratatouille recipe from Recipya. "
-            "The shopping list items should be a SUBSET of the recipe's ingredients — "
-            "specifically, only the under-stocked or missing ones. "
-            "Items that are clearly unrelated to ratatouille should cause a NO."
-        )
-        passed, detail = llm_judge(content, condition)
-        check("8. cross_app_ingredients_match", 3, passed, detail)
+        }
+        listed_targets.discard(None)
+        unexpected = sorted(listed_targets - recipe_targets)
+        check("8. cross_app_ingredients_match", 1, not unexpected,
+              "all listed vegetables occur in the recipe" if not unexpected
+              else f"listed vegetables absent from recipe: {', '.join(unexpected)}")
     except Exception as e:
-        check("8. cross_app_ingredients_match", 3, False, f"exception: {e}")
+        check("8. cross_app_ingredients_match", 1, False, f"exception: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

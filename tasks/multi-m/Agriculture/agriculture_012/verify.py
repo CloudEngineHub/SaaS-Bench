@@ -175,7 +175,7 @@ def _find_product():
         "ISNULL(p.Sku, '') "
         "FROM Product p "
         "WHERE p.WineVintage = 2023 "
-        "AND LOWER(p.Name) LIKE '%boutique%chardonnay%' "
+        "AND LOWER(LTRIM(RTRIM(p.Name))) = 'boutique organic chardonnay' "
         "ORDER BY p.CreatedOn DESC"
     )
     try:
@@ -243,20 +243,21 @@ def check_1_product_exists():
         check("1. product_record_found", 1, False, f"exception: {e}")
 
 
-def check_2_producer_nonempty():
-    """Producer (FBOName) must be non-empty."""
+def check_2_producer_exact():
+    """Producer (FBOName) must match the required value exactly."""
     prod = _find_product()
     if not prod:
-        check("2. producer_fbo_nonempty", 1, False, "no product found")
+        check("2. producer_exact_match", 1, False, "no product found")
         return
     try:
         val = prod["fbo_name"]
-        if val and val.upper() != "NULL":
-            check("2. producer_fbo_nonempty", 1, True, f"producer='{val}'")
+        if val.strip().lower() == "boutique organic farm":
+            check("2. producer_exact_match", 1, True, f"producer='{val}'")
         else:
-            check("2. producer_fbo_nonempty", 1, False, "FBOName is empty")
+            check("2. producer_exact_match", 1, False,
+                  f"producer='{val}', expected 'Boutique Organic Farm'")
     except Exception as e:
-        check("2. producer_fbo_nonempty", 1, False, f"exception: {e}")
+        check("2. producer_exact_match", 1, False, f"exception: {e}")
 
 
 def check_3_appellation_nonempty():
@@ -277,7 +278,7 @@ def check_3_appellation_nonempty():
 
 
 def check_4_alcohol_value():
-    """Alcohol must be approximately 12.5% (12.0-13.0 range)."""
+    """Alcohol must be 12.5%."""
     prod = _find_product()
     if not prod:
         check("4. alcohol_12_5_pct", 2, False, "no product found")
@@ -288,11 +289,11 @@ def check_4_alcohol_value():
             check("4. alcohol_12_5_pct", 2, False, "WineAlcohol is null")
             return
         val = float(raw)
-        if 12.0 <= val <= 13.0:
+        if abs(val - 12.5) < 0.1:
             check("4. alcohol_12_5_pct", 2, True, f"alcohol={val}%")
         else:
             check("4. alcohol_12_5_pct", 2, False,
-                  f"alcohol={val}%, expected 12.0-13.0")
+                  f"alcohol={val}%, expected 12.5")
     except ValueError:
         check("4. alcohol_12_5_pct", 2, False, f"cannot parse: '{raw}'")
     except Exception as e:
@@ -422,21 +423,32 @@ def check_9_label_alcohol_pct_vol():
         check("9. alcohol_pct_vol_format", 1, False, f"exception: {e}")
 
 
-def check_10_producer_exact_match():
-    """Producer (FBOName) must match the required value exactly."""
+def check_10_sensory_fields():
+    """Serving information is specific and appropriate for Chardonnay."""
     prod = _find_product()
     if not prod:
-        check("10. producer_exact_match", 2, False, "no product found")
+        check("10. sensory_fields_chardonnay", 2, False, "no product found")
         return
     try:
-        val = (prod["fbo_name"] or "").strip()
-        if val.lower() == "boutique organic farm":
-            check("10. producer_exact_match", 2, True, f"producer='{val}'")
-        else:
-            check("10. producer_exact_match", 2, False,
-                  f"producer='{val}', expected 'Boutique Organic Farm'")
+        html = _fetch_label_page()
+        if html is None:
+            check("10. sensory_fields_chardonnay", 2, False,
+                  "label page not accessible")
+            return
+        text = re.sub(r'<[^>]+>', ' ', html)
+        text = re.sub(r'\s+', ' ', text).strip()
+        passed, raw = llm_judge(
+            text[:4000],
+            "The content includes ALL Chardonnay serving details: (1) a serving "
+            "temperature range within 8-12 degrees Celsius, (2) a Chardonnay or "
+            "white-wine glass, (3) at least two specific food dishes appropriate "
+            "for Chardonnay, and (4) a concise tasting description with a concrete "
+            "aroma, acidity, body, or finish characteristic. Generic placeholders "
+            "or missing fields must result in NO."
+        )
+        check("10. sensory_fields_chardonnay", 2, passed, f"llm_judge: {raw}")
     except Exception as e:
-        check("10. producer_exact_match", 2, False, f"exception: {e}")
+        check("10. sensory_fields_chardonnay", 2, False, f"exception: {e}")
 
 
 def check_11_label_page_accessible():
@@ -450,8 +462,9 @@ def check_11_label_page_accessible():
         if html is not None:
             has_wine = ("chardonnay" in html.lower() or "boutique" in html.lower()
                         or prod["name"].lower().split()[0] in html.lower())
-            check("11. label_page_accessible", 2, True,
-                  f"contains wine info: {has_wine}")
+            check("11. label_page_accessible", 2, has_wine,
+                  "required wine identity found" if has_wine
+                  else "page reachable but required wine identity is absent")
         else:
             sku = prod["sku"]
             code = sku if sku and sku.upper() != "NULL" else prod["id"]
@@ -464,7 +477,7 @@ def check_11_label_page_accessible():
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
     check_1_product_exists()
-    check_2_producer_nonempty()
+    check_2_producer_exact()
     check_3_appellation_nonempty()
     check_4_alcohol_value()
     check_5_volume_750()
@@ -472,7 +485,7 @@ def main() -> None:
     check_7_organic_certified()
     check_8_wine_type_white()
     check_9_label_alcohol_pct_vol()
-    check_10_producer_exact_match()
+    check_10_sensory_fields()
     check_11_label_page_accessible()
 
     total = sum(w for _, w, _, _ in _checks)
