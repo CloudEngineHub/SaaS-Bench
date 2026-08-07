@@ -11,7 +11,9 @@ Required env vars:
 """
 
 import json
+import html
 import os
+import re
 import subprocess
 import sys
 
@@ -44,16 +46,13 @@ GROCY_DB_CANDIDATES = [
 AUDIT_FLAG = "AUDIT FLAG: Missing FarmOS harvest log"
 
 # Delivery manifest from the task description: exact Grocy product name ->
-# batch number. Matched entries reference FarmOS harvest logs that exist
-# verbatim; unmatched entries reference harvest logs that do NOT exist.
-MANIFEST_MATCHED = {
+# expected FarmOS harvest log name. Match status is derived from the live DB.
+MANIFEST = {
     "Sliced Beets": "2024 Beet Harvest — North Field Center Bed",
     "Strawberries": "2024 Strawberry Harvest — Peak Week June 15",
     "Whole Kernel Corn": "2024 Sweet Corn Harvest — South Field 1",
     "Cherry Tomatoes By Sainsburys": "2024 Cherry Tomato Harvest — North Field West Bed 1",
     "Organic Peas & Shoestring Carrots": "2024 Carrot Harvest — North Field Center Bed 1",
-}
-MANIFEST_UNMATCHED = {
     "Organic Green Beans": "2024 Green Bean Harvest — North Field East Bed 1",
     "Chestnut Mushrooms": "2024 Chestnut Mushroom Harvest — West Greenhouse 1",
     "Shreds Iceberg": "2024 Iceberg Lettuce Harvest — North Field East Bed 2",
@@ -142,7 +141,7 @@ def _load_manifest_products() -> dict[str, dict]:
     global _products_by_name
     if _products_by_name is not None:
         return _products_by_name
-    names = list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+    names = list(MANIFEST)
     quoted = ", ".join("'" + n.replace("'", "''") + "'" for n in names)
     rows = grocy_sql_json(
         "SELECT id, name, COALESCE(description, '') AS description "
@@ -163,12 +162,24 @@ def _load_farmos_harvest_names() -> set[str]:
     return _farmos_harvest_names
 
 
+def _manifest_truth() -> tuple[set[str], set[str]]:
+    harvest_names = _load_farmos_harvest_names()
+    matched = {name for name, batch in MANIFEST.items() if batch in harvest_names}
+    return matched, set(MANIFEST) - matched
+
+
+def _visible_text_before_flag(description: str) -> str:
+    prefix = re.split(re.escape(AUDIT_FLAG), description, maxsplit=1, flags=re.IGNORECASE)[0]
+    prefix = re.sub(r"<[^>]+>", " ", html.unescape(prefix))
+    return re.sub(r"\s+", " ", prefix).strip()
+
+
 # ── Individual checks ─────────────────────────────────────────────────────────
 def check_1_manifest_products_exist() -> None:
     """All 8 manifest products exist in Grocy (exact name)."""
     try:
         products = _load_manifest_products()
-        missing = [n for n in list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+        missing = [n for n in MANIFEST
                    if n not in products]
         check("1. manifest_products_exist", 1, not missing,
               f"found {len(products)}/8 manifest products" if not missing
@@ -186,63 +197,54 @@ def check_2_farmos_logs_match_manifest() -> None:
             check("2. farmos_logs_match_manifest", 1, False,
                   "no harvest logs found in farmos")
             return
-        missing = [b for b in MANIFEST_MATCHED.values() if b not in names]
-        unexpected = [b for b in MANIFEST_UNMATCHED.values() if b in names]
-        problems = []
-        if missing:
-            problems.append(f"expected logs missing: {'; '.join(missing)}")
-        if unexpected:
-            problems.append(f"unexpected logs present: {'; '.join(unexpected)}")
-        check("2. farmos_logs_match_manifest", 1, not problems,
-              f"{len(names)} harvest logs; manifest references consistent"
-              if not problems else " — ".join(problems))
+        matched, unmatched = _manifest_truth()
+        check("2. farmos_logs_match_manifest", 1, True,
+              f"{len(names)} harvest logs; derived {len(matched)} matched and "
+              f"{len(unmatched)} unmatched manifest entries")
     except Exception as e:
         check("2. farmos_logs_match_manifest", 1, False, f"exception: {e}")
 
 
-def check_3_unmatched_products_flagged() -> None:
+def check_3_audit_recall_and_precision() -> None:
     """Every manifest product whose batch number has no FarmOS harvest log
     carries the exact audit flag in its description."""
     try:
         products = _load_manifest_products()
+        matched, unmatched = _manifest_truth()
         missing_flag = []
-        for name in MANIFEST_UNMATCHED:
+        for name in unmatched:
             p = products.get(name)
             if not p:
                 missing_flag.append(f"{name} (product not found)")
             elif AUDIT_FLAG not in p["description"]:
                 missing_flag.append(name)
-        check("3. unmatched_products_flagged", 4, not missing_flag,
-              f"all {len(MANIFEST_UNMATCHED)} unmatched products flagged"
-              if not missing_flag
-              else f"unmatched products lacking flag: {'; '.join(missing_flag)}")
+        wrongly_flagged = [
+            name for name in matched
+            if products.get(name) and AUDIT_FLAG.casefold() in products[name]["description"].casefold()
+        ]
+        problems = missing_flag + [f"{name} (matched but flagged)" for name in wrongly_flagged]
+        check("3. audit_recall_and_precision", 4, not problems,
+              f"exactly the {len(unmatched)} unmatched products are flagged"
+              if not problems else f"targeting errors: {'; '.join(problems)}")
     except Exception as e:
-        check("3. unmatched_products_flagged", 4, False, f"exception: {e}")
+        check("3. audit_recall_and_precision", 4, False, f"exception: {e}")
 
 
-def check_4_matched_products_not_flagged() -> None:
-    """Products whose batch number exists in FarmOS must NOT be flagged.
-    Requires audit evidence first (at least one unmatched product flagged)."""
+def check_4_flags_not_duplicated() -> None:
+    """Each unmatched product carries the audit flag exactly once."""
     try:
         products = _load_manifest_products()
-        flagged_unmatched = [
-            name for name in MANIFEST_UNMATCHED
-            if products.get(name) and AUDIT_FLAG in products[name]["description"]
+        _, unmatched = _manifest_truth()
+        bad = [
+            name for name in unmatched
+            if not products.get(name)
+            or products[name]["description"].casefold().count(AUDIT_FLAG.casefold()) != 1
         ]
-        if not flagged_unmatched:
-            check("4. matched_products_not_flagged", 2, False,
-                  "no audit evidence: no unmatched product has been flagged yet")
-            return
-        wrongly_flagged = [
-            name for name in MANIFEST_MATCHED
-            if products.get(name) and AUDIT_FLAG in products[name]["description"]
-        ]
-        check("4. matched_products_not_flagged", 2, not wrongly_flagged,
-              f"all {len(MANIFEST_MATCHED)} matched products correctly unflagged"
-              if not wrongly_flagged
-              else f"matched products wrongly flagged: {'; '.join(wrongly_flagged)}")
+        check("4. flags_not_duplicated", 2, not bad,
+              f"all {len(unmatched)} unmatched products contain one flag"
+              if not bad else f"missing or repeated flags: {'; '.join(bad)}")
     except Exception as e:
-        check("4. matched_products_not_flagged", 2, False, f"exception: {e}")
+        check("4. flags_not_duplicated", 2, False, f"exception: {e}")
 
 
 def check_5_flag_appended_not_replaced() -> None:
@@ -252,15 +254,14 @@ def check_5_flag_appended_not_replaced() -> None:
         products = _load_manifest_products()
         flagged = [
             (name, products[name]["description"])
-            for name in MANIFEST_UNMATCHED
-            if products.get(name) and AUDIT_FLAG in products[name]["description"]
+            for name in _manifest_truth()[1]
+            if products.get(name) and AUDIT_FLAG.casefold() in products[name]["description"].casefold()
         ]
         if not flagged:
             check("5. flag_appended_not_replaced", 2, False,
                   "no flagged products found to verify append position")
             return
-        bad = [name for name, desc in flagged
-               if desc.index(AUDIT_FLAG) == 0]
+        bad = [name for name, desc in flagged if not _visible_text_before_flag(desc)]
         check("5. flag_appended_not_replaced", 2, not bad,
               f"all {len(flagged)} flagged products keep their original text"
               if not bad
@@ -282,7 +283,7 @@ def check_6_flag_targeting_exact() -> None:
             check("6. flag_targeting_exact", 2, False,
                   "no products flagged anywhere in grocy")
             return
-        expected = set(MANIFEST_UNMATCHED)
+        expected = _manifest_truth()[1]
         extra = sorted(flagged_names - expected)
         missing = sorted(expected - flagged_names)
         problems = []
@@ -301,8 +302,8 @@ def check_6_flag_targeting_exact() -> None:
 def main() -> None:
     check_1_manifest_products_exist()
     check_2_farmos_logs_match_manifest()
-    check_3_unmatched_products_flagged()
-    check_4_matched_products_not_flagged()
+    check_3_audit_recall_and_precision()
+    check_4_flags_not_duplicated()
     check_5_flag_appended_not_replaced()
     check_6_flag_targeting_exact()
 

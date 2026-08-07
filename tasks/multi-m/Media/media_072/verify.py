@@ -599,10 +599,6 @@ def check_12_siyuan_bidirectional_link() -> None:
         if has_forward and has_backward:
             check("12. siyuan_bidirectional_link", 3, True,
                   "refs exist in both directions")
-        elif has_forward or has_backward:
-            direction = "EP-62->Director" if has_forward else "Director->EP-62"
-            check("12. siyuan_bidirectional_link", 3, True,
-                  f"ref {direction} found; SiYuan auto-generates the backlink view")
         else:
             ep62_blocks = siyuan_sql(
                 f"SELECT markdown FROM blocks WHERE root_id='{_ep62_root_id}' "
@@ -616,19 +612,6 @@ def check_12_siyuan_bidirectional_link() -> None:
             dir_md = "\n".join(b.get("markdown", "") for b in dir_blocks)
             has_fwd_inline = _director_root_id in ep62_md
             has_bwd_inline = _ep62_root_id in dir_md
-
-            if not has_fwd_inline:
-                ep62_lower = ep62_md.lower()
-                has_fwd_inline = (
-                    "matt reeves" in ep62_lower
-                    or "director filmography" in ep62_lower
-                )
-            if not has_bwd_inline:
-                dir_lower = dir_md.lower()
-                has_bwd_inline = (
-                    "ep-62" in dir_lower
-                    or "visual darkness" in dir_lower
-                )
 
             if has_fwd_inline and has_bwd_inline:
                 check("12. siyuan_bidirectional_link", 3, True,

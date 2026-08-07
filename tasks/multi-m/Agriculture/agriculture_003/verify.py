@@ -1,7 +1,7 @@
 """
 Verifier for agriculture_003: Create Pinot Noir 2024 digital wine label in e-label
 
-Checks: 11 weighted checks across e-label.
+Checks: 10 weighted checks across e-label.
 Strategy: docker exec MSSQL (sqlcmd) for all checks.
 
 Required env vars:
@@ -11,12 +11,14 @@ Required env vars:
 import os
 import sys
 import subprocess
+import re
 
 # ── Config (from env) ─────────────────────────────────────────────────────────
 HOST = os.getenv("SERVER_HOSTNAME", "localhost")
 
 E_LABEL_PORT = os.getenv("E_LABEL_PORT")
 E_LABEL_CONTAINER = os.getenv("E_LABEL_CONTAINER")
+BASE_URL = f"http://{HOST}:{E_LABEL_PORT}"
 
 _missing = []
 for var in ["E_LABEL_PORT", "E_LABEL_CONTAINER"]:
@@ -105,7 +107,7 @@ def _load_product() -> bool:
     query = (
         "SELECT TOP 1 "
         "  Name, FBOName, WineVintage, WineAppellation, WineAlcohol, Volume, "
-        "  CAST(Id AS NVARCHAR(36)), Brand, WineType "
+        "  CAST(Id AS NVARCHAR(36)), Brand, WineType, ISNULL(Sku, '') "
         "FROM Product "
         "WHERE LOWER(LTRIM(RTRIM(Name))) = 'estate pinot noir' "
         "ORDER BY CreatedOn DESC"
@@ -119,6 +121,7 @@ def _load_product() -> bool:
             "appellation": r[3], "alcohol": r[4], "volume": r[5],
             "id": r[6], "brand": r[7] if len(r) > 7 else "",
             "wine_type": r[8] if len(r) > 8 else "",
+            "sku": r[9] if len(r) > 9 else "",
         })
         return True
     return False
@@ -185,29 +188,20 @@ def check_7_wine_type_red() -> None:
     check("7. wine type = Red", 1, ok, f"WineType={wt} (expected 2=Red)")
 
 
-def check_8_grape_pinot_noir() -> None:
-    name = (_product.get("name", "") or "").lower()
-    brand = (_product.get("brand", "") or "").lower()
-    combined = f"{name} {brand}"
-    in_text = "pinot noir" in combined or "pinot" in combined
-
-    in_ingredients = False
+def check_8_product_image() -> None:
     product_id = _product.get("id", "")
-    if product_id:
-        query = (
-            "SELECT i.Name FROM ProductIngredient pi "
-            "JOIN Ingredient i ON pi.IngredientId = i.Id "
-            f"WHERE pi.ProductId = '{product_id}'"
-        )
-        rc, stdout, _ = sqlcmd(query)
-        if rc == 0:
-            for row in _parse_sqlcmd_rows(stdout):
-                if row and "pinot" in row[0].lower():
-                    in_ingredients = True
-                    break
-    ok = in_text or in_ingredients
-    check("8. grape variety Pinot Noir referenced", 1, ok,
-          f"name='{_product.get('name', '')}', brand='{_product.get('brand', '')}'")
+    if not product_id:
+        check("8. product image uploaded", 1, False, "no product found")
+        return
+    rc, stdout, _ = sqlcmd(
+        f"SELECT COUNT(*) FROM Image WHERE ProductId = '{product_id}'"
+    )
+    rows = _parse_sqlcmd_rows(stdout) if rc == 0 else []
+    try:
+        count = int(rows[0][0]) if rows and rows[0] else 0
+    except ValueError:
+        count = 0
+    check("8. product image uploaded", 1, count >= 1, f"image_count={count}")
 
 
 def check_9_sulphites_allergen() -> None:
@@ -234,40 +228,36 @@ def check_9_sulphites_allergen() -> None:
     check("9. sulphites allergen declared", 2, ok, detail)
 
 
-def check_10_ingredients_linked() -> None:
+def check_10_public_label_page() -> None:
+    """The public page targeted by the QR code is reachable and shows this wine."""
     product_id = _product.get("id", "")
+    sku = (_product.get("sku", "") or "").strip()
     if not product_id:
-        check("10. ≥1 ingredient linked", 1, False, "no product found")
+        check("10. public label page shows required wine", 2, False, "no product found")
         return
-    query = (
-        f"SELECT COUNT(*) FROM ProductIngredient WHERE ProductId = '{product_id}'"
-    )
-    rc, stdout, _ = sqlcmd(query)
     try:
-        count = int(stdout.strip()) if rc == 0 else 0
-    except ValueError:
-        rows = _parse_sqlcmd_rows(stdout)
-        count = int(rows[0][0]) if rows and rows[0] else 0
-    ok = count >= 1
-    check("10. ≥1 ingredient linked", 1, ok, f"count={count}")
+        import urllib.error
+        import urllib.request
 
-
-def check_11_product_image() -> None:
-    product_id = _product.get("id", "")
-    if not product_id:
-        check("11. product has image (QR/label)", 1, False, "no product found")
-        return
-    query = (
-        f"SELECT COUNT(*) FROM Image WHERE ProductId = '{product_id}'"
-    )
-    rc, stdout, _ = sqlcmd(query)
-    try:
-        count = int(stdout.strip()) if rc == 0 else 0
-    except ValueError:
-        rows = _parse_sqlcmd_rows(stdout)
-        count = int(rows[0][0]) if rows and rows[0] else 0
-    ok = count >= 1
-    check("11. product has image (QR/label)", 1, ok, f"image_count={count}")
+        candidates = [sku, product_id] if sku and sku.upper() != "NULL" else [product_id]
+        for code in dict.fromkeys(candidates):
+            try:
+                with urllib.request.urlopen(f"{BASE_URL}/l/{code}", timeout=15) as response:
+                    body = response.read().decode("utf-8", errors="replace")
+                text = re.sub(r"<[^>]+>", " ", body).lower()
+                has_identity = "estate pinot noir" in text
+                has_vintage = "2024" in text
+                has_alcohol = re.search(r"13[.,]5\s*%?\s*vol", text) is not None
+                if response.status == 200 and has_identity and has_vintage and has_alcohol:
+                    check("10. public label page shows required wine", 2, True,
+                          f"reachable at /l/{code}")
+                    return
+            except (urllib.error.URLError, TimeoutError):
+                continue
+        check("10. public label page shows required wine", 2, False,
+              "no public label page contained the required name, vintage, and alcohol")
+    except Exception as e:
+        check("10. public label page shows required wine", 2, False, f"exception: {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -279,10 +269,9 @@ def main() -> None:
     check_5_alcohol()
     check_6_volume()
     check_7_wine_type_red()
-    check_8_grape_pinot_noir()
+    check_8_product_image()
     check_9_sulphites_allergen()
-    check_10_ingredients_linked()
-    check_11_product_image()
+    check_10_public_label_page()
 
     total = sum(w for _, w, _, _ in _checks)
     earned = sum(w for _, w, p, _ in _checks if p)

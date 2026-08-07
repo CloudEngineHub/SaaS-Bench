@@ -1,5 +1,5 @@
 **Task Requirements:**
-Read the provided PDF paper on Collaborative Knowledge Creation. In SiYuan, create a new notebook called 'Academic Research'. Inside, create a document titled 'Paper Summary: Collaborative Knowledge Creation'. Write a structured summary with three sections: 'Core Thesis' (at least 2 sentences), 'Methodology' (at least 3 sentences), and 'Podcast Relevance' (at least 2 sentences). Ensure the summary accurately reflects the PDF's content, specifically mentioning the role of Information Retrieval (IR) in knowledge production.
+Read the provided PDF paper on Collaborative Knowledge Creation. In SiYuan, create a new notebook called 'Academic Research'. Inside, create a document titled 'Paper Summary: Collaborative Knowledge Creation'. Write a structured summary using three separate headings: 'Core Thesis' (at least 2 sentences), 'Methodology' (at least 3 sentences), and 'Podcast Relevance' (at least 2 sentences). Ensure the summary accurately reflects the PDF's content, specifically mentioning the role of Information Retrieval (IR) in knowledge production.
 
 **Steps:**
 1. Read the provided PDF to extract the core thesis, methodology, and relevance.

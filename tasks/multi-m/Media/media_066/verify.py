@@ -1,7 +1,7 @@
 """
 Verifier for media_066: Research summary of collaborative IR PDF in SiYuan
 
-Checks: 10 weighted checks across siyuan.
+Checks: 11 weighted checks across siyuan.
 Strategy: SiYuan REST API (SQL query + markdown export)
 
 Required env vars:
@@ -305,7 +305,7 @@ def check_5_podcast_relevance_section(token: str, doc_id: str | None, md_content
 def _extract_section_text(md_content: str, section_name: str) -> str:
     """Extract text under a markdown heading matching section_name until the next heading."""
     pattern = re.compile(
-        rf'^(#{1,6})\s+.*{re.escape(section_name)}.*$',
+        rf'^(#{{1,6}})\s+.*{re.escape(section_name)}.*$',
         re.IGNORECASE | re.MULTILINE,
     )
     match = pattern.search(md_content)

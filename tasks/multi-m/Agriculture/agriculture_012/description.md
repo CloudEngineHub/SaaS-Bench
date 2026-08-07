@@ -21,6 +21,13 @@ Step 2 — Open the new product's **Edit** form (Products → the new record →
 - **Food Business Operator** section → Name: `Boutique Organic Farm`
 - **Ingredients** section → add the predefined ingredient `Sulphites` from the ingredient list (it is flagged as an allergen, which satisfies the EU allergen declaration)
 
+Also complete the consumer-facing serving information for this Chardonnay:
+
+- Serving temperature: a range between 8–12°C
+- Glass type: a Chardonnay or white-wine glass
+- Food pairings: at least 2 specific dishes appropriate for Chardonnay
+- Tasting description: no more than 100 characters and mentioning at least one concrete aroma, acidity, body, or finish characteristic
+
 Step 3 — Publish the label from the product's **Details** page:
 
 - The Details page shows the auto-generated public e-label page link; open it and confirm it displays the wine data, including the alcohol shown as "12.5 % vol.".
@@ -28,7 +35,7 @@ Step 3 — Publish the label from the product's **Details** page:
 
 **Steps:**
 1. In e-label, create the `Boutique Organic Chardonnay` record with the exact Step-1 values (name without vintage; volume in liters; Type White).
-2. On the product's Edit form, enable the Organic certification, set the Food Business Operator name to `Boutique Organic Farm`, and add the predefined `Sulphites` ingredient.
+2. On the product's Edit form, enable the Organic certification, set the Food Business Operator name to `Boutique Organic Farm`, add the predefined `Sulphites` ingredient, and complete the serving information.
 3. Open the product's Details page, confirm the public e-label page renders with the alcohol shown as "% vol.", and download the QR code.
 
 **Login Credentials:**

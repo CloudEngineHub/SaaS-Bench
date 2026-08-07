@@ -265,6 +265,7 @@ def _find_notebook_id() -> str | None:
 
 _doc_id = None
 _doc_id_searched = False
+SIYUAN_DOC_TITLE = "Paper Summary: Collaborative Knowledge Creation"
 
 
 def _find_doc() -> str | None:
@@ -272,26 +273,17 @@ def _find_doc() -> str | None:
     if _doc_id_searched:
         return _doc_id
     _doc_id_searched = True
-    rows = siyuan_sql(
-        "SELECT id, content, box, hpath FROM blocks "
-        "WHERE type = 'd' AND content LIKE '%Paper Summary%Collaborative Knowledge Creation%' "
-        "LIMIT 10"
-    )
     nb_id = _find_notebook_id()
-    for row in rows:
-        if nb_id and row.get("box") == nb_id:
-            _doc_id = row["id"]
-            return _doc_id
+    if not nb_id:
+        return None
+    escaped_title = SIYUAN_DOC_TITLE.replace("'", "''")
+    rows = siyuan_sql(
+        "SELECT id, content, box FROM blocks "
+        f"WHERE type = 'd' AND LOWER(TRIM(content)) = LOWER('{escaped_title}') "
+        f"AND box = '{nb_id}' LIMIT 1"
+    )
     if rows:
         _doc_id = rows[0]["id"]
-        return _doc_id
-    rows2 = siyuan_sql(
-        "SELECT id, content, box FROM blocks "
-        "WHERE type = 'd' AND content LIKE '%Collaborative Knowledge Creation%' "
-        "LIMIT 10"
-    )
-    if rows2:
-        _doc_id = rows2[0]["id"]
         return _doc_id
     return None
 
@@ -333,19 +325,14 @@ def _get_section_text(heading_name: str) -> str:
     if not md.strip():
         return ""
     for _lvl, title, lines in md_sections(md):
-        if heading_name.lower() in title.lower():
+        normalized = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+        if normalized == heading_name.lower():
             return "\n".join(l.strip() for l in lines if l.strip())
     return ""
 
 
 def _get_full_doc_text() -> str:
-    blocks = _get_doc_blocks()
-    parts = []
-    for b in blocks:
-        text = b.get("markdown") or b.get("content") or ""
-        if text.strip():
-            parts.append(text.strip())
-    return "\n".join(parts)
+    return _get_doc_md()
 
 
 # ── Individual checks ─────────────────────────────────────────────────────────
@@ -369,17 +356,10 @@ def check_1_notebook_exists() -> None:
 def check_2_document_exists() -> None:
     try:
         doc_id = _find_doc()
-        passed = doc_id is not None
-        detail = ""
-        if passed:
-            nb_id = _find_notebook_id()
-            rows = siyuan_sql(
-                f"SELECT box FROM blocks WHERE id = '{doc_id}' AND type = 'd' LIMIT 1"
-            )
-            if nb_id and rows and rows[0].get("box") != nb_id:
-                detail = "document found but not in 'Academic Research' notebook"
-        else:
-            detail = "no document matching 'Paper Summary: Collaborative Knowledge Creation'"
+        passed = doc_id is not None and _find_notebook_id() is not None
+        detail = "" if passed else (
+            f"no exact '{SIYUAN_DOC_TITLE}' document in 'Academic Research' notebook"
+        )
         check("2. document_exists", 2, passed, detail)
     except Exception as e:
         check("2. document_exists", 2, False, f"exception: {e}")
@@ -392,7 +372,8 @@ def check_3_section_core_thesis() -> None:
             b.get("content", "").strip()
             for b in blocks if b.get("type") == "h"
         ]
-        found = any("core thesis" in h.lower() for h in headings)
+        found = any(re.sub(r"[^a-z0-9]+", " ", h.lower()).strip() == "core thesis"
+                    for h in headings)
         check("3. section_core_thesis_exists", 1, found,
               "" if found else f"headings found: {headings[:10]}")
     except Exception as e:
@@ -406,7 +387,8 @@ def check_4_section_methodology() -> None:
             b.get("content", "").strip()
             for b in blocks if b.get("type") == "h"
         ]
-        found = any("methodology" in h.lower() for h in headings)
+        found = any(re.sub(r"[^a-z0-9]+", " ", h.lower()).strip() == "methodology"
+                    for h in headings)
         check("4. section_methodology_exists", 1, found,
               "" if found else f"headings found: {headings[:10]}")
     except Exception as e:
@@ -420,7 +402,8 @@ def check_5_section_podcast_relevance() -> None:
             b.get("content", "").strip()
             for b in blocks if b.get("type") == "h"
         ]
-        found = any("podcast relevance" in h.lower() for h in headings)
+        found = any(re.sub(r"[^a-z0-9]+", " ", h.lower()).strip() == "podcast relevance"
+                    for h in headings)
         check("5. section_podcast_relevance_exists", 1, found,
               "" if found else f"headings found: {headings[:10]}")
     except Exception as e:
@@ -498,15 +481,17 @@ def check_10_cross_modal_pdf_consistency() -> None:
             check("10. cross_modal_pdf_consistency", 3, False,
                   "document empty or not found")
             return
-        passed, raw = llm_judge(
+        passed, raw = llm_judge_vision(
+            pdf_path,
             full_text,
-            "The summary is about a paper on Collaborative Knowledge Creation "
-            "and Information Retrieval (IR). It accurately reflects the paper's "
-            "core thesis, methodology, and relevance. It specifically mentions "
-            "the role of Information Retrieval (IR) in knowledge production."
+            "Compare the summary against the supplied PDF, not merely its title. "
+            "The summary must accurately cover the paper's core thesis, its actual "
+            "methodology or conceptual framework, and the role of Information "
+            "Retrieval in collaborative knowledge production. Generic claims that "
+            "could be written without reading the PDF must result in NO."
         )
         check("10. cross_modal_pdf_consistency", 3, passed,
-              "" if passed else f"llm_judge: {raw}")
+              f"llm_judge_vision: {raw}")
     except Exception as e:
         check("10. cross_modal_pdf_consistency", 3, False, f"exception: {e}")
 

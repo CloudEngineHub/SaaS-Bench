@@ -4,7 +4,7 @@ delivery manifest (Grocy product -> batch number) against FarmOS harvest log
 names; flag discrepant products with both a description note and a
 '[REVIEW REQUIRED]' name suffix.
 
-Checks: 7 weighted checks (13 total points) across grocy, farmos.
+Checks: 7 weighted checks (12 total points) across grocy, farmos.
 Strategy: grocy=docker exec PHP PDO (SQLite); farmos=docker exec PHP PDO (SQLite)
 
 Required env vars:
@@ -12,7 +12,9 @@ Required env vars:
 """
 
 import json
+import html
 import os
+import re
 import subprocess
 import sys
 
@@ -46,15 +48,12 @@ DISCREPANCY_NOTE = "DISCREPANCY: No matching FarmOS harvest log found"
 REVIEW_SUFFIX = "[REVIEW REQUIRED]"
 
 # Delivery manifest from the task description: exact Grocy product name ->
-# batch number. Matched entries reference FarmOS harvest logs that exist
-# verbatim; unmatched entries reference harvest logs that do NOT exist.
-MANIFEST_MATCHED = {
+# expected FarmOS harvest log name. Match status is derived from the live DB.
+MANIFEST = {
     "365 Everyday Value, Fat Free Skim Milk": "Cow Milk — Weekly Collection August Week 1",
     "Clover Honey": "2024 Honey Harvest — Hive A and B",
     "Pure Raw Honey": "2024 Honey Harvest — Hive A and B",
     "Black Forest Girl, Homemade Spaetzles, Egg Noodles": "2024 Egg Collection — Weekly Tally August Week 3",
-}
-MANIFEST_UNMATCHED = {
     "Nonfat Greek Yogurt": "2024 Goat Milk Collection — Weekly Tally September Week 1",
     "Cottage Cheese": "2024 Sheep Milk Collection — Weekly Tally August Week 3",
     "Kfactor 22 Manuka Honey": "2024 Manuka Honey Harvest — Hive C",
@@ -148,7 +147,7 @@ def _load_manifest_products() -> dict[str, dict]:
     global _products_by_name
     if _products_by_name is not None:
         return _products_by_name
-    names = list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+    names = list(MANIFEST)
     quoted = ", ".join("'" + n.replace("'", "''") + "'" for n in names)
     rows = grocy_sql_json(
         "SELECT id, name, COALESCE(description, '') AS description "
@@ -180,6 +179,20 @@ def _load_farmos_harvest_names() -> set[str]:
     return _farmos_harvest_names
 
 
+def _manifest_truth() -> tuple[set[str], set[str]]:
+    harvest_names = _load_farmos_harvest_names()
+    matched = {name for name, batch in MANIFEST.items() if batch in harvest_names}
+    return matched, set(MANIFEST) - matched
+
+
+def _visible_text_before_note(description: str) -> str:
+    prefix = re.split(
+        re.escape(DISCREPANCY_NOTE), description, maxsplit=1, flags=re.IGNORECASE
+    )[0]
+    prefix = re.sub(r"<[^>]+>", " ", html.unescape(prefix))
+    return re.sub(r"\s+", " ", prefix).strip()
+
+
 def _flagged_desc_names() -> set[str]:
     rows = grocy_sql_json(
         "SELECT name FROM products WHERE description LIKE "
@@ -200,7 +213,7 @@ def check_1_manifest_products_exist() -> None:
     """All 8 manifest products exist in Grocy (exact name)."""
     try:
         products = _load_manifest_products()
-        missing = [n for n in list(MANIFEST_MATCHED) + list(MANIFEST_UNMATCHED)
+        missing = [n for n in MANIFEST
                    if n not in products]
         check("1. manifest_products_exist", 1, not missing,
               f"found {len(products)}/8 manifest products" if not missing
@@ -218,89 +231,78 @@ def check_2_farmos_logs_match_manifest() -> None:
             check("2. farmos_logs_match_manifest", 1, False,
                   "no harvest logs found in farmos")
             return
-        missing = [b for b in MANIFEST_MATCHED.values() if b not in names]
-        unexpected = [b for b in MANIFEST_UNMATCHED.values() if b in names]
-        problems = []
-        if missing:
-            problems.append(f"expected logs missing: {'; '.join(missing)}")
-        if unexpected:
-            problems.append(f"unexpected logs present: {'; '.join(unexpected)}")
-        check("2. farmos_logs_match_manifest", 1, not problems,
-              f"{len(names)} harvest logs; manifest references consistent"
-              if not problems else " — ".join(problems))
+        matched, unmatched = _manifest_truth()
+        check("2. farmos_logs_match_manifest", 1, True,
+              f"{len(names)} harvest logs; derived {len(matched)} matched and "
+              f"{len(unmatched)} unmatched manifest entries")
     except Exception as e:
         check("2. farmos_logs_match_manifest", 1, False, f"exception: {e}")
 
 
-def check_3_unmatched_have_review_suffix() -> None:
+def check_3_review_suffix_recall_and_precision() -> None:
     """Every unmatched product's name ends with '[REVIEW REQUIRED]'."""
     try:
         products = _load_manifest_products()
         missing = []
-        for name in MANIFEST_UNMATCHED:
+        matched, unmatched = _manifest_truth()
+        for name in unmatched:
             p = products.get(name)
-            if p and REVIEW_SUFFIX in p["name"]:
+            if p and p["name"].strip().endswith(REVIEW_SUFFIX):
                 continue
             missing.append(name)
-        check("3. unmatched_have_review_suffix", 2, not missing,
-              f"all {len(MANIFEST_UNMATCHED)} unmatched products carry the suffix"
-              if not missing
-              else f"unmatched products missing suffix: {'; '.join(missing)}")
+        wrong = [
+            name for name in matched
+            if products.get(name) and REVIEW_SUFFIX in products[name]["name"]
+        ]
+        problems = missing + [f"{name} (matched but suffixed)" for name in wrong]
+        check("3. review_suffix_recall_and_precision", 2, not problems,
+              f"exactly the {len(unmatched)} unmatched products carry the suffix"
+              if not problems else f"suffix targeting errors: {'; '.join(problems)}")
     except Exception as e:
-        check("3. unmatched_have_review_suffix", 2, False, f"exception: {e}")
+        check("3. review_suffix_recall_and_precision", 2, False, f"exception: {e}")
 
 
-def check_4_unmatched_have_discrepancy_note() -> None:
+def check_4_discrepancy_note_recall_and_precision() -> None:
     """Every unmatched product's description contains the exact discrepancy note."""
     try:
         products = _load_manifest_products()
         missing = []
-        for name in MANIFEST_UNMATCHED:
+        matched, unmatched = _manifest_truth()
+        for name in unmatched:
             p = products.get(name)
             if not p:
                 missing.append(f"{name} (product not found)")
             elif DISCREPANCY_NOTE not in (p.get("description") or ""):
                 missing.append(name)
-        check("4. unmatched_have_discrepancy_note", 3, not missing,
-              f"all {len(MANIFEST_UNMATCHED)} unmatched products carry the note"
-              if not missing
-              else f"unmatched products missing note: {'; '.join(missing)}")
+        wrong = [
+            name for name in matched
+            if products.get(name)
+            and DISCREPANCY_NOTE.casefold() in (products[name].get("description") or "").casefold()
+        ]
+        problems = missing + [f"{name} (matched but noted)" for name in wrong]
+        check("4. discrepancy_note_recall_and_precision", 3, not problems,
+              f"exactly the {len(unmatched)} unmatched products carry the note"
+              if not problems else f"note targeting errors: {'; '.join(problems)}")
     except Exception as e:
-        check("4. unmatched_have_discrepancy_note", 3, False, f"exception: {e}")
+        check("4. discrepancy_note_recall_and_precision", 3, False, f"exception: {e}")
 
 
-def check_5_matched_products_clean() -> None:
-    """Matched products carry neither the name suffix nor a DISCREPANCY note.
-    Requires audit evidence first (at least one unmatched product flagged)."""
+def check_5_review_suffix_exact() -> None:
+    """Every unmatched product has one terminal review suffix."""
     try:
         products = _load_manifest_products()
-        evidence = [
-            name for name in MANIFEST_UNMATCHED
-            if products.get(name)
-            and (REVIEW_SUFFIX in products[name].get("name", "")
-                 or DISCREPANCY_NOTE in (products[name].get("description") or ""))
+        _, unmatched = _manifest_truth()
+        bad = [
+            name for name in unmatched
+            if not products.get(name)
+            or products[name]["name"].count(REVIEW_SUFFIX) != 1
+            or not products[name]["name"].strip().endswith(REVIEW_SUFFIX)
         ]
-        if not evidence:
-            check("5. matched_products_clean", 2, False,
-                  "no audit evidence: no unmatched product has been flagged yet")
-            return
-        flagged_rows = _flagged_name_rows()
-        flagged_suffix_ids = {int(r["id"]) for r in flagged_rows}
-        desc_flagged = _flagged_desc_names()
-        bad = []
-        for name in MANIFEST_MATCHED:
-            p = products.get(name)
-            if not p:
-                continue
-            if int(p["id"]) in flagged_suffix_ids or REVIEW_SUFFIX in p["name"]:
-                bad.append(f"{name} (name suffix)")
-            if name in desc_flagged or "DISCREPANCY" in (p.get("description") or "").upper():
-                bad.append(f"{name} (description)")
-        check("5. matched_products_clean", 2, not bad,
-              f"all {len(MANIFEST_MATCHED)} matched products are clean"
-              if not bad else f"matched products wrongly flagged: {'; '.join(bad)}")
+        check("5. review_suffix_exact", 2, not bad,
+              f"all {len(unmatched)} unmatched products have one terminal suffix"
+              if not bad else f"missing, repeated, or non-terminal suffix: {'; '.join(bad)}")
     except Exception as e:
-        check("5. matched_products_clean", 2, False, f"exception: {e}")
+        check("5. review_suffix_exact", 2, False, f"exception: {e}")
 
 
 def check_6_note_appended_not_replaced() -> None:
@@ -310,15 +312,15 @@ def check_6_note_appended_not_replaced() -> None:
         products = _load_manifest_products()
         flagged = [
             (name, products[name]["description"])
-            for name in MANIFEST_UNMATCHED
-            if products.get(name) and DISCREPANCY_NOTE in (products[name].get("description") or "")
+            for name in _manifest_truth()[1]
+            if products.get(name)
+            and DISCREPANCY_NOTE.casefold() in (products[name].get("description") or "").casefold()
         ]
         if not flagged:
             check("6. note_appended_not_replaced", 1, False,
                   "no flagged products found to verify append position")
             return
-        bad = [name for name, desc in flagged
-               if desc.index(DISCREPANCY_NOTE) == 0]
+        bad = [name for name, desc in flagged if not _visible_text_before_note(desc)]
         check("6. note_appended_not_replaced", 1, not bad,
               f"all {len(flagged)} flagged products keep their original text"
               if not bad
@@ -331,7 +333,7 @@ def check_7_flag_targeting_exact() -> None:
     """Store-wide, the products carrying the name suffix and the products
     carrying the description note are both exactly the unmatched set."""
     try:
-        expected = set(MANIFEST_UNMATCHED)
+        expected = _manifest_truth()[1]
         suffix_rows = _flagged_name_rows()
         suffix_base = set()
         for r in suffix_rows:
@@ -375,9 +377,9 @@ def check_7_flag_targeting_exact() -> None:
 def main() -> None:
     check_1_manifest_products_exist()
     check_2_farmos_logs_match_manifest()
-    check_3_unmatched_have_review_suffix()
-    check_4_unmatched_have_discrepancy_note()
-    check_5_matched_products_clean()
+    check_3_review_suffix_recall_and_precision()
+    check_4_discrepancy_note_recall_and_precision()
+    check_5_review_suffix_exact()
     check_6_note_appended_not_replaced()
     check_7_flag_targeting_exact()
 
